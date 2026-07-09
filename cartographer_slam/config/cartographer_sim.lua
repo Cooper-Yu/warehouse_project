@@ -1,0 +1,1 @@
+-- Placeholder for Checkpoint 11 simulation Cartographer configuration.

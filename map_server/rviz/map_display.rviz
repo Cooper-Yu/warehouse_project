@@ -1,0 +1,7 @@
+Panels:
+  - Class: rviz_common/Displays
+Visualization Manager:
+  Class: ""
+  Displays: []
+  Global Options:
+    Fixed Frame: map
