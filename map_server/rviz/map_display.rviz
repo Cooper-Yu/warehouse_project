@@ -2,6 +2,13 @@ Panels:
   - Class: rviz_common/Displays
 Visualization Manager:
   Class: ""
-  Displays: []
+  Displays:
+    - Alpha: 0.7
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Enabled: true
+      Name: Saved Map
+      Topic:
+        Value: /map
   Global Options:
     Fixed Frame: map
