@@ -1,0 +1,4 @@
+# ROS 2 colcon build products are recreated locally and must not be committed.
+/build/
+/install/
+/log/
