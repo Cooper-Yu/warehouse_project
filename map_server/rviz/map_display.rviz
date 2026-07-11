@@ -41,6 +41,8 @@ Tools:
   - Class: rviz_default_plugins/SetGoal
     Topic:
       Value: /goal_pose
+Toolbars:
+  toolButtonStyle: 2
 Visualization Manager:
   Class: ""
   Displays:

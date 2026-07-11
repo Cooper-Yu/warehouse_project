@@ -33,6 +33,8 @@ Tools:
   - Class: rviz_default_plugins/SetInitialPose
     Topic:
       Value: /initialpose
+Toolbars:
+  toolButtonStyle: 2
 Visualization Manager:
   Class: ""
   Displays:

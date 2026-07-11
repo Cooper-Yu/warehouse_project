@@ -1,5 +1,7 @@
 Panels:
   - Class: rviz_common/Displays
+Toolbars:
+  toolButtonStyle: 2
 Visualization Manager:
   Class: ""
   Displays:
