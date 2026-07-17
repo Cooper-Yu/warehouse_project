@@ -4,3 +4,7 @@
 /log/
 __pycache__/
 *.pyc
+
+# The diagnostic helper can be run from the repository root.
+navigation_debug_*/
+navigation_debug_*.tar.gz

@@ -8,6 +8,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def profile_nodes(condition, use_sim_time, files):
+    """Create one conditionally launched Nav2 stack for a sim or real profile."""
     common_time = {"use_sim_time": ParameterValue(use_sim_time, value_type=bool)}
 
     return [
@@ -103,6 +104,7 @@ def generate_launch_description():
         "navigate_w_replanning_and_recovery.xml",
     ])
 
+    # One argument switches every environment-specific file as a unit.
     sim_files = {
         "map": PathJoinSubstitution([
             map_share, "config", "warehouse_map_sim.yaml"

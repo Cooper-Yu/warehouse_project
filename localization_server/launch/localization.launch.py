@@ -14,6 +14,7 @@ def generate_launch_description():
     map_file = LaunchConfiguration("map_file")
     use_sim_time = LaunchConfiguration("use_sim_time")
     amcl_config = LaunchConfiguration("amcl_config")
+    # map_file selects matching clock and AMCL defaults; both remain overridable.
     use_sim_time_value = ParameterValue(use_sim_time, value_type=bool)
 
     map_yaml = PathJoinSubstitution([

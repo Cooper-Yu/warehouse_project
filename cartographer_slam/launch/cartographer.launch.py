@@ -18,6 +18,7 @@ def generate_launch_description():
 
         selected_config = context.perform_substitution(configuration_basename)
         if not selected_config:
+            # The checkpoint selects the environment with use_sim_time alone.
             sim_time_value = context.perform_substitution(use_sim_time).lower()
             selected_config = (
                 "cartographer_sim.lua"
