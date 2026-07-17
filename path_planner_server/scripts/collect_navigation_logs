@@ -89,5 +89,17 @@ for pid in "${capture_pids[@]}"; do
   wait "${pid}" 2>/dev/null || true
 done
 
+{
+  for node in map_server amcl planner_server controller_server behavior_server bt_navigator; do
+    echo "=== ${node} ==="
+    timeout 5 ros2 lifecycle get "/${node}" 2>&1 || true
+  done
+} >"${output_dir}/lifecycle_end.txt"
+
+timeout 8 ros2 run tf2_ros tf2_echo map odom \
+  >"${output_dir}/tf_map_to_odom_end.txt" 2>&1 || true
+timeout 8 ros2 run tf2_ros tf2_echo odom robot_base_footprint \
+  >"${output_dir}/tf_odom_to_base_end.txt" 2>&1 || true
+
 tar -czf "${archive}" -C "$(dirname "${output_dir}")" "$(basename "${output_dir}")"
 echo "Navigation debug bundle created: ${archive}"

@@ -5,6 +5,8 @@ Panels:
     Name: Tool Properties
   - Class: rviz_common/Views
     Name: Views
+  - Class: nav2_rviz_plugins/Navigation 2
+    Name: Navigation 2
 Toolbars:
   toolButtonStyle: 2
 Visualization Manager:
