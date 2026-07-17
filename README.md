@@ -61,7 +61,8 @@ robot_odom -> robot_base_footprint -> robot_base_link
 robot_base_footprint -> robot_front_laser_link
 ```
 
-Before real motion testing, confirm the RB1 footprint, lateral-motion support,
-and safe velocity/acceleration limits from the course or robot configuration.
-The current `+/-0.25 m` square footprint remains a conservative candidate, not
-a final physical specification.
+RB1 model evidence confirms a body envelope of approximately `0.500 m x
+0.498 m`, matching the configured `+/-0.25 m` square footprint. The installed
+controller is `diff_drive_controller/DiffDriveController`, so lateral velocity
+remains disabled. The first real profile uses conservative Nav2 limits below
+the base-controller maximums and still requires controlled real-lab validation.
