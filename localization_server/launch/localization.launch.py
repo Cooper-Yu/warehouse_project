@@ -1,7 +1,12 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -9,6 +14,7 @@ def generate_launch_description():
     map_file = LaunchConfiguration("map_file")
     use_sim_time = LaunchConfiguration("use_sim_time")
     amcl_config = LaunchConfiguration("amcl_config")
+    use_sim_time_value = ParameterValue(use_sim_time, value_type=bool)
 
     map_yaml = PathJoinSubstitution([
         FindPackageShare("map_server"),
@@ -36,13 +42,25 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "use_sim_time",
-            default_value="true",
-            description="Use simulation clock when true.",
+            default_value=PythonExpression([
+                "'", map_file, "' == 'warehouse_map_sim.yaml'"
+            ]),
+            description=(
+                "Use simulation clock. Defaults from map_file: sim map=true, "
+                "real map=false."
+            ),
         ),
         DeclareLaunchArgument(
             "amcl_config",
-            default_value="amcl_config_sim.yaml",
-            description="AMCL parameter file in the localization_server config folder.",
+            default_value=PythonExpression([
+                "'amcl_config_sim.yaml' if '",
+                use_sim_time,
+                "'.lower() in ('true', '1') else 'amcl_config_real.yaml'",
+            ]),
+            description=(
+                "AMCL parameter file. Defaults to the sim or real config "
+                "selected by use_sim_time."
+            ),
         ),
         Node(
             package="nav2_map_server",
@@ -51,7 +69,7 @@ def generate_launch_description():
             output="screen",
             parameters=[{
                 "yaml_filename": map_yaml,
-                "use_sim_time": use_sim_time,
+                "use_sim_time": use_sim_time_value,
             }],
         ),
         Node(
@@ -59,7 +77,7 @@ def generate_launch_description():
             executable="amcl",
             name="amcl",
             output="screen",
-            parameters=[amcl_params, {"use_sim_time": use_sim_time}],
+            parameters=[amcl_params, {"use_sim_time": use_sim_time_value}],
         ),
         Node(
             package="nav2_lifecycle_manager",
@@ -67,7 +85,7 @@ def generate_launch_description():
             name="lifecycle_manager_localization",
             output="screen",
             parameters=[{
-                "use_sim_time": use_sim_time,
+                "use_sim_time": use_sim_time_value,
                 "autostart": True,
                 "node_names": ["map_server", "amcl"],
             }],
@@ -78,6 +96,6 @@ def generate_launch_description():
             name="rviz2_localization",
             output="screen",
             arguments=["-d", rviz_config],
-            parameters=[{"use_sim_time": use_sim_time}],
+            parameters=[{"use_sim_time": use_sim_time_value}],
         ),
     ])
