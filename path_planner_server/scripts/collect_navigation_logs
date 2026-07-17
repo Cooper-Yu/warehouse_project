@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+
+set -u
+
+duration="${1:-45}"
+if ! [[ "${duration}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Usage: ros2 run path_planner_server collect_navigation_logs [seconds]"
+  exit 2
+fi
+
+timestamp="$(date +%Y%m%d_%H%M%S)"
+output_dir="${PWD}/navigation_debug_${timestamp}"
+archive="${output_dir}.tar.gz"
+mkdir -p "${output_dir}"
+
+run_snapshot() {
+  local name="$1"
+  shift
+  {
+    echo "COMMAND: $*"
+    echo
+    timeout 12 "$@"
+  } >"${output_dir}/${name}.txt" 2>&1 || true
+}
+
+capture_topic() {
+  local name="$1"
+  local topic="$2"
+  timeout "${duration}" ros2 topic echo "${topic}" \
+    >"${output_dir}/${name}.txt" 2>&1 &
+  capture_pids+=("$!")
+}
+
+capture_pids=()
+
+{
+  echo "Navigation debug bundle"
+  echo "Collected: $(date --iso-8601=seconds)"
+  echo "Duration: ${duration} seconds"
+  echo "ROS_DISTRO: ${ROS_DISTRO:-unknown}"
+  echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-default}"
+  echo "Host: $(hostname)"
+  echo "Kernel: $(uname -srmo)"
+} >"${output_dir}/metadata.txt"
+
+for snapshot in \
+  "nodes|ros2 node list" \
+  "topics|ros2 topic list -t" \
+  "actions|ros2 action list -t" \
+  "navigate_action|ros2 action info /navigate_to_pose" \
+  "topic_map|ros2 topic info /map -v" \
+  "topic_scan|ros2 topic info /scan -v" \
+  "topic_odom|ros2 topic info /odom -v" \
+  "topic_cmd_vel|ros2 topic info /cmd_vel -v" \
+  "topic_plan|ros2 topic info /plan -v" \
+  "topic_local_plan|ros2 topic info /local_plan -v"; do
+  name="${snapshot%%|*}"
+  read -r -a command <<<"${snapshot#*|}"
+  run_snapshot "${name}" "${command[@]}" &
+  capture_pids+=("$!")
+done
+
+(
+  for node in map_server amcl planner_server controller_server behavior_server bt_navigator; do
+    echo "=== ${node} ==="
+    timeout 5 ros2 lifecycle get "/${node}" 2>&1 || true
+  done
+) >"${output_dir}/lifecycle.txt" &
+capture_pids+=("$!")
+
+timeout 8 ros2 run tf2_ros tf2_echo map odom \
+  >"${output_dir}/tf_map_to_odom.txt" 2>&1 &
+capture_pids+=("$!")
+timeout 8 ros2 run tf2_ros tf2_echo odom robot_base_footprint \
+  >"${output_dir}/tf_odom_to_base.txt" 2>&1 &
+capture_pids+=("$!")
+
+capture_topic rosout /rosout
+capture_topic navigate_status /navigate_to_pose/_action/status
+capture_topic cmd_vel /cmd_vel
+capture_topic global_plan /plan
+capture_topic local_plan /local_plan
+capture_topic amcl_pose /amcl_pose
+
+echo "Collecting navigation data for ${duration} seconds."
+echo "Now use 2D Pose Estimate and Nav2 Goal in RViz."
+
+for pid in "${capture_pids[@]}"; do
+  wait "${pid}" 2>/dev/null || true
+done
+
+tar -czf "${archive}" -C "$(dirname "${output_dir}")" "$(basename "${output_dir}")"
+echo "Navigation debug bundle created: ${archive}"

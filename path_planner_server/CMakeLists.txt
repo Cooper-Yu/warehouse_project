@@ -9,4 +9,9 @@ install(DIRECTORY launch config rviz
   PATTERN "*.pyc" EXCLUDE
 )
 
+install(PROGRAMS
+  scripts/collect_navigation_logs
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
