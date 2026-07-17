@@ -35,6 +35,15 @@ Visualization Manager:
       Topic:
         Reliability Policy: Best Effort
         Value: /scan
+    - Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Keep: 100
+      Name: Odometry
+      Position Tolerance: 0.1
+      Topic:
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Value: /odom
     - Class: nav2_rviz_plugins/ParticleCloud
       Color: 0; 180; 0
       Enabled: true

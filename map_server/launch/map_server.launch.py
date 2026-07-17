@@ -1,13 +1,19 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
     map_file = LaunchConfiguration("map_file")
     use_sim_time = LaunchConfiguration("use_sim_time")
+    use_sim_time_value = ParameterValue(use_sim_time, value_type=bool)
 
     map_yaml = PathJoinSubstitution([
         FindPackageShare("map_server"),
@@ -29,8 +35,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "use_sim_time",
-            default_value="true",
-            description="Use simulation clock when true.",
+            default_value=PythonExpression([
+                "'", map_file, "' == 'warehouse_map_sim.yaml'"
+            ]),
+            description=(
+                "Use simulation clock. Defaults from map_file: sim map=true, "
+                "real map=false."
+            ),
         ),
         Node(
             package="nav2_map_server",
@@ -39,7 +50,7 @@ def generate_launch_description():
             output="screen",
             parameters=[{
                 "yaml_filename": map_yaml,
-                "use_sim_time": use_sim_time,
+                "use_sim_time": use_sim_time_value,
             }],
         ),
         Node(
@@ -48,7 +59,7 @@ def generate_launch_description():
             name="lifecycle_manager_map_server",
             output="screen",
             parameters=[{
-                "use_sim_time": use_sim_time,
+                "use_sim_time": use_sim_time_value,
                 "autostart": True,
                 "node_names": ["map_server"],
             }],
@@ -59,6 +70,6 @@ def generate_launch_description():
             name="rviz2_map_display",
             output="screen",
             arguments=["-d", rviz_config],
-            parameters=[{"use_sim_time": use_sim_time}],
+            parameters=[{"use_sim_time": use_sim_time_value}],
         ),
     ])
