@@ -17,9 +17,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/SetInitialPose
       Topic:
         Value: /initialpose
-    - Class: rviz_default_plugins/SetGoal
-      Topic:
-        Value: /goal_pose
+    - Class: nav2_rviz_plugins/GoalTool
   Displays:
     - Class: rviz_default_plugins/Map
       Enabled: true
