@@ -12,8 +12,8 @@ localization, and navigation with the RB1 robot.
 - Task 3 navigation: simulation runtime validated in The Construct. A Nav2
   goal completed with `Feedback: reached`, `Distance remaining: 0.00 m`, and
   zero recoveries.
-- Task 3 real navigation: interface evidence collected; real Nav2 YAML and
-  low-speed lab validation remain open.
+- Task 3 real navigation: validated in the real lab with successful goals,
+  global/local paths, nonzero velocity commands, and physical AMCL movement.
 
 ## Simulation Navigation
 
@@ -65,4 +65,4 @@ RB1 model evidence confirms a body envelope of approximately `0.500 m x
 0.498 m`, matching the configured `+/-0.25 m` square footprint. The installed
 controller is `diff_drive_controller/DiffDriveController`, so lateral velocity
 remains disabled. The first real profile uses conservative Nav2 limits below
-the base-controller maximums and still requires controlled real-lab validation.
+the base-controller maximums and passed controlled real-lab validation.

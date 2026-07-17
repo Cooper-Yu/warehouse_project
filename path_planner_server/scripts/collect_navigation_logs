@@ -13,6 +13,12 @@ output_dir="${PWD}/navigation_debug_${timestamp}"
 archive="${output_dir}.tar.gz"
 mkdir -p "${output_dir}"
 
+odom_frame="$(
+  timeout 5 ros2 topic echo /odom --once 2>/dev/null |
+    awk '/frame_id:/ {print $2; exit}'
+)"
+odom_frame="${odom_frame:-odom}"
+
 run_snapshot() {
   local name="$1"
   shift
@@ -39,6 +45,7 @@ capture_pids=()
   echo "Duration: ${duration} seconds"
   echo "ROS_DISTRO: ${ROS_DISTRO:-unknown}"
   echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-default}"
+  echo "Odom frame: ${odom_frame}"
   echo "Host: $(hostname)"
   echo "Kernel: $(uname -srmo)"
 } >"${output_dir}/metadata.txt"
@@ -68,10 +75,10 @@ done
 ) >"${output_dir}/lifecycle.txt" &
 capture_pids+=("$!")
 
-timeout 8 ros2 run tf2_ros tf2_echo map odom \
+timeout 8 ros2 run tf2_ros tf2_echo map "${odom_frame}" \
   >"${output_dir}/tf_map_to_odom.txt" 2>&1 &
 capture_pids+=("$!")
-timeout 8 ros2 run tf2_ros tf2_echo odom robot_base_footprint \
+timeout 8 ros2 run tf2_ros tf2_echo "${odom_frame}" robot_base_footprint \
   >"${output_dir}/tf_odom_to_base.txt" 2>&1 &
 capture_pids+=("$!")
 
@@ -96,9 +103,9 @@ done
   done
 } >"${output_dir}/lifecycle_end.txt"
 
-timeout 8 ros2 run tf2_ros tf2_echo map odom \
+timeout 8 ros2 run tf2_ros tf2_echo map "${odom_frame}" \
   >"${output_dir}/tf_map_to_odom_end.txt" 2>&1 || true
-timeout 8 ros2 run tf2_ros tf2_echo odom robot_base_footprint \
+timeout 8 ros2 run tf2_ros tf2_echo "${odom_frame}" robot_base_footprint \
   >"${output_dir}/tf_odom_to_base_end.txt" 2>&1 || true
 
 tar -czf "${archive}" -C "$(dirname "${output_dir}")" "$(basename "${output_dir}")"
