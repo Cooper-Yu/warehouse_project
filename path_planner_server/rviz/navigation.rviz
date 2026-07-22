@@ -21,6 +21,23 @@ Visualization Manager:
         Value: /initialpose
     - Class: nav2_rviz_plugins/GoalTool
   Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
     - Class: rviz_default_plugins/Map
       Enabled: true
       Name: Saved Map
@@ -37,13 +54,20 @@ Visualization Manager:
         Value: /scan
     - Class: rviz_default_plugins/Odometry
       Enabled: true
-      Keep: 100
+      Keep: 10
       Name: Odometry
       Position Tolerance: 0.1
       Topic:
         Durability Policy: Volatile
         Reliability Policy: Reliable
         Value: /odom
+    - Class: rviz_default_plugins/PoseWithCovariance
+      Enabled: true
+      Name: AMCL Pose
+      Topic:
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Value: /amcl_pose
     - Class: nav2_rviz_plugins/ParticleCloud
       Color: 0; 180; 0
       Enabled: true
@@ -150,5 +174,8 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/TopDownOrtho
+      Scale: 70
       Target Frame: map
+      X: 2.715
+      Y: -1.315
     Saved: ~
