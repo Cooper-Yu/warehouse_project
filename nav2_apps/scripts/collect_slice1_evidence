@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+output_dir="${repo_root}/nav2_apps/runtime_logs/slice1_${timestamp}"
+mkdir -p "${output_dir}"
+
+{
+  echo "timestamp_utc: ${timestamp}"
+  echo "environment: ${ROS_DISTRO:-unknown}"
+  echo "commit_sha: $(git -C "${repo_root}" rev-parse HEAD)"
+  echo "command: $*"
+  echo "working_tree_status: |"
+  git -C "${repo_root}" status --short | sed 's/^/  /'
+} > "${output_dir}/metadata.yaml"
+
+if [[ $# -gt 0 ]]; then
+  set +e
+  "$@" 2>&1 | tee "${output_dir}/command.log"
+  command_status=${PIPESTATUS[0]}
+  set -e
+  echo "command_exit_code: ${command_status}" >> "${output_dir}/metadata.yaml"
+else
+  command_status=0
+  echo "command_exit_code: not_run" >> "${output_dir}/metadata.yaml"
+fi
+
+echo "Raw Slice 1 evidence: ${output_dir}"
+exit "${command_status}"

@@ -3,8 +3,13 @@
 /install/
 /log/
 __pycache__/
+.pytest_cache/
 *.pyc
 
 # The diagnostic helper can be run from the repository root.
 navigation_debug_*/
 navigation_debug_*.tar.gz
+
+# Checkpoint 12 raw runtime output stays local. Review bounded summaries before
+# adding anything under nav2_apps/evidence/ to Git.
+/nav2_apps/runtime_logs/
