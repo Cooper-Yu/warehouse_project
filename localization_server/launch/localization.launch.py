@@ -1,5 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import (
     LaunchConfiguration,
     PathJoinSubstitution,
@@ -14,6 +15,7 @@ def generate_launch_description():
     map_file = LaunchConfiguration("map_file")
     use_sim_time = LaunchConfiguration("use_sim_time")
     amcl_config = LaunchConfiguration("amcl_config")
+    use_rviz = LaunchConfiguration("use_rviz")
     # map_file selects matching clock and AMCL defaults; both remain overridable.
     use_sim_time_value = ParameterValue(use_sim_time, value_type=bool)
 
@@ -50,6 +52,11 @@ def generate_launch_description():
                 "Use simulation clock. Defaults from map_file: sim map=true, "
                 "real map=false."
             ),
+        ),
+        DeclareLaunchArgument(
+            "use_rviz",
+            default_value="true",
+            description="Start the localization RViz instance.",
         ),
         DeclareLaunchArgument(
             "amcl_config",
@@ -96,6 +103,7 @@ def generate_launch_description():
             executable="rviz2",
             name="rviz2_localization",
             output="screen",
+            condition=IfCondition(use_rviz),
             arguments=["-d", rviz_config],
             parameters=[{"use_sim_time": use_sim_time_value}],
         ),

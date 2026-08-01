@@ -103,5 +103,18 @@ def generate_launch_description():
             ),
             *_navigation_nodes(IfCondition(use_sim_time), use_sim_time, sim_files),
             *_navigation_nodes(UnlessCondition(use_sim_time), use_sim_time, real_files),
+            Node(
+                package="rviz2",
+                executable="rviz2",
+                name="rviz2_navigation",
+                output="screen",
+                arguments=[
+                    "-d",
+                    PathJoinSubstitution([package_share, "rviz", "navigation.rviz"]),
+                ],
+                parameters=[
+                    {"use_sim_time": ParameterValue(use_sim_time, value_type=bool)}
+                ],
+            ),
         ]
     )
