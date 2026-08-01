@@ -18,7 +18,6 @@ setup(
     maintainer_email="liuzi9240@gmail.com",
     description="Checkpoint 12 Nav2 mission applications.",
     license="Apache-2.0",
-    tests_require=["pytest"],
     scripts=[
         "scripts/collect_slice1_evidence",
         "scripts/move_shelf_to_ship.py",

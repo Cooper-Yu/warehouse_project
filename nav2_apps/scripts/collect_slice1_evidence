@@ -2,7 +2,33 @@
 
 set -euo pipefail
 
-repo_root="$(git rev-parse --show-toplevel)"
+find_repo_root() {
+  if [[ -n "${NAV2_APPS_REPO_ROOT:-}" ]] &&
+    git -C "${NAV2_APPS_REPO_ROOT}" rev-parse --show-toplevel >/dev/null 2>&1; then
+    git -C "${NAV2_APPS_REPO_ROOT}" rev-parse --show-toplevel
+    return
+  fi
+
+  if git rev-parse --show-toplevel >/dev/null 2>&1; then
+    git rev-parse --show-toplevel
+    return
+  fi
+
+  package_prefix="$(ros2 pkg prefix nav2_apps 2>/dev/null || true)"
+  workspace_root="${package_prefix%/install/nav2_apps}"
+  source_candidate="${workspace_root}/src/warehouse_project"
+  if [[ "${workspace_root}" != "${package_prefix}" ]] &&
+    git -C "${source_candidate}" rev-parse --show-toplevel >/dev/null 2>&1; then
+    git -C "${source_candidate}" rev-parse --show-toplevel
+    return
+  fi
+
+  echo "Cannot locate warehouse_project Git repository." >&2
+  echo "Run inside the repository or set NAV2_APPS_REPO_ROOT." >&2
+  return 1
+}
+
+repo_root="$(find_repo_root)"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 output_dir="${repo_root}/nav2_apps/runtime_logs/slice1_${timestamp}"
 mkdir -p "${output_dir}"
