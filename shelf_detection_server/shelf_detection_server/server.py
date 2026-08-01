@@ -44,6 +44,9 @@ class ShelfDetectionServer(Node):
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._tf_broadcaster = TransformBroadcaster(self)
+        self._active_cart_frame = None
+        self._cart_frame_expiry = 0.0
+        self._cart_frame_timer = self.create_timer(0.1, self._republish_cart_frame)
         self._service = self.create_service(
             GoToLoading, "/approach_shelf", self._handle_request
         )
@@ -187,6 +190,19 @@ class ShelfDetectionServer(Node):
             return None
 
     def _publish_cart_frame(self, frame_id: str, x: float, y: float) -> None:
+        self._active_cart_frame = (frame_id, x, y)
+        self._cart_frame_expiry = time.monotonic() + 10.0
+        self._broadcast_cart_frame(frame_id, x, y)
+
+    def _republish_cart_frame(self) -> None:
+        if self._active_cart_frame is None:
+            return
+        if time.monotonic() >= self._cart_frame_expiry:
+            self._active_cart_frame = None
+            return
+        self._broadcast_cart_frame(*self._active_cart_frame)
+
+    def _broadcast_cart_frame(self, frame_id: str, x: float, y: float) -> None:
         transform = TransformStamped()
         transform.header.stamp = self.get_clock().now().to_msg()
         transform.header.frame_id = frame_id
