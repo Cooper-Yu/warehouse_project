@@ -15,13 +15,12 @@ from nav2_apps.result_gate import ExitCode, classify_task_result
 
 
 def _load_shelf_service_type():
-    """Load the course service only when detection mode is selected."""
+    """Load the shared service only when detection mode is selected."""
     try:
-        from attach_shelf.srv import GoToLoading
+        from warehouse_interfaces.srv import GoToLoading
     except ImportError as error:
         raise RuntimeError(
-            "detection-only requires the course attach_shelf interface "
-            "(attach_shelf/srv/GoToLoading)"
+            "detection-only requires warehouse_interfaces/srv/GoToLoading"
         ) from error
     return GoToLoading
 
