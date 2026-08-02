@@ -37,9 +37,15 @@ def test_attach_service_owns_motion_and_elevator_sequence():
 
     server_attach = _function(server_tree, "_perform_stepwise_attach")
     server_calls = _called_methods(server_attach)
+    assert "_align_at_safe_standoff" in server_calls
     assert "_drive_forward_measured" in server_calls
-    assert "_apply_pre_lock_yaw" in server_calls
+    assert "_apply_pre_lock_yaw" not in server_calls
     assert "_publish_elevator_up" in server_calls
+
+    alignment = _function(server_tree, "_align_at_safe_standoff")
+    alignment_calls = _called_methods(alignment)
+    assert "_rotate_open_loop" in alignment_calls
+    assert "_recover_cart_frame_after_motion" in alignment_calls
 
     mission_attach = _function(mission_tree, "_request_stepwise_attach")
     assigned_true = any(

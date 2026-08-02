@@ -29,15 +29,6 @@ from shelf_detection_server.leg_geometry import (
 )
 
 
-def c9_yaw_correction_enabled(
-    step: int,
-    x: float,
-    correction_steps: int,
-    min_distance: float,
-) -> bool:
-    return step < correction_steps and x > min_distance
-
-
 def c9_center_lock_enabled(
     step: int,
     x: float,
@@ -51,11 +42,29 @@ def c9_locked_drive_distance(x: float, scale: float) -> float:
     return max(x, 0.0) * max(scale, 0.0)
 
 
-def c9_pre_lock_yaw_correction(
+def bounded_yaw_correction(
     yaw: float, gain: float, max_abs_correction: float
 ) -> float:
     limit = max(max_abs_correction, 0.0)
     return max(-limit, min(yaw * gain, limit))
+
+
+def shelf_heading_aligned(yaw: float, tolerance: float) -> bool:
+    return abs(yaw) <= max(tolerance, 0.0)
+
+
+def shelf_staging_error(
+    midpoint_x: float,
+    midpoint_y: float,
+    shelf_heading: float,
+    standoff_distance: float,
+) -> tuple:
+    """Return the base-frame displacement to a centered staging pose."""
+    standoff = max(standoff_distance, 0.0)
+    return (
+        midpoint_x - standoff * math.cos(shelf_heading),
+        midpoint_y - standoff * math.sin(shelf_heading),
+    )
 
 
 class ShelfDetectionServer(Node):
@@ -71,22 +80,24 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("rotate_speed", 0.20)
         self.declare_parameter("yaw_tolerance", 0.03)
         self.declare_parameter("max_detected_yaw", 0.60)
-        self.declare_parameter("lateral_yaw_gain", 0.40)
+        self.declare_parameter("alignment_heading_gain", 1.0)
+        self.declare_parameter("alignment_max_yaw_correction", 0.40)
+        self.declare_parameter("alignment_standoff_distance", 1.00)
+        self.declare_parameter("alignment_position_tolerance", 0.08)
+        self.declare_parameter("alignment_retry_count", 6)
+        self.declare_parameter("alignment_max_drive_distance", 0.75)
         self.declare_parameter("forward_step_distance", 0.20)
         self.declare_parameter("center_distance_tolerance", 0.20)
         self.declare_parameter("center_lateral_tolerance", 0.08)
         self.declare_parameter("center_lock_distance", 0.35)
         self.declare_parameter("center_lock_min_steps", 2)
         self.declare_parameter("center_drive_scale", 1.0)
-        self.declare_parameter("pre_lock_max_yaw_correction", 0.08)
-        self.declare_parameter("yaw_correction_steps", 3)
-        self.declare_parameter("min_yaw_correction_distance", 0.55)
         self.declare_parameter("cart_frame_retry_count", 6)
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("odom_lookup_timeout", 1.0)
         self.declare_parameter("measured_drive_timeout_scale", 3.0)
         self.declare_parameter("final_drive_distance", 0.30)
-        self.declare_parameter("movement_timeout", 45.0)
+        self.declare_parameter("movement_timeout", 55.0)
         self.declare_parameter("elevator_publish_count", 5)
 
         self._latest_scan: Optional[LaserScan] = None
@@ -120,7 +131,8 @@ class ShelfDetectionServer(Node):
             callback_group=self._service_group,
         )
         self.get_logger().info(
-            "/approach_shelf ready: detection-only false, C9-style attach true"
+            "/approach_shelf ready: detection-only false, safe-standoff "
+            "shelf-normal attach true"
         )
 
     def _scan_callback(self, scan: LaserScan) -> None:
@@ -221,7 +233,12 @@ class ShelfDetectionServer(Node):
         deadline = time.monotonic() + float(
             self.get_parameter("movement_timeout").value
         )
-        target = initial_target
+        target = self._align_at_safe_standoff(initial_target, deadline)
+        if target is None:
+            self.get_logger().error(
+                "attach stopped: safe-standoff shelf alignment failed"
+            )
+            return False
         step = 0
         center_approach_complete = False
         while rclpy.ok() and time.monotonic() < deadline:
@@ -242,12 +259,26 @@ class ShelfDetectionServer(Node):
             center_y = float(
                 self.get_parameter("center_lateral_tolerance").value
             )
+            yaw_tolerance = float(self.get_parameter("yaw_tolerance").value)
             self.get_logger().info(
                 "stepwise attach sample: "
                 f"step={step} x={x:.3f} y={y:.3f} "
                 f"midpoint_bearing={yaw:.3f} "
                 f"shelf_normal_yaw={shelf_heading:.3f}"
             )
+            if not shelf_heading_aligned(shelf_heading, yaw_tolerance):
+                self.get_logger().error(
+                    "attach stopped: shelf heading drifted outside "
+                    f"tolerance; yaw={shelf_heading:.3f} "
+                    f"tolerance={yaw_tolerance:.3f}"
+                )
+                return False
+            if abs(y) > center_y:
+                self.get_logger().error(
+                    "attach stopped: midpoint left the centered corridor; "
+                    f"y={y:.3f} tolerance={center_y:.3f}"
+                )
+                return False
             if x <= center_x and abs(y) <= center_y:
                 center_approach_complete = True
                 break
@@ -274,8 +305,6 @@ class ShelfDetectionServer(Node):
                     f"locked_distance={locked_distance:.3f}; "
                     "close-range cart_frame re-detection is skipped"
                 )
-                if not self._apply_pre_lock_yaw(yaw, deadline):
-                    return False
                 if not self._drive_forward_measured(
                     locked_distance, deadline
                 ):
@@ -283,34 +312,7 @@ class ShelfDetectionServer(Node):
                 center_approach_complete = True
                 break
 
-            yaw_correction_steps = int(
-                self.get_parameter("yaw_correction_steps").value
-            )
-            min_yaw_distance = float(
-                self.get_parameter("min_yaw_correction_distance").value
-            )
-            yaw_correction_enabled = c9_yaw_correction_enabled(
-                step,
-                x,
-                yaw_correction_steps,
-                min_yaw_distance,
-            )
-            yaw_tolerance = float(self.get_parameter("yaw_tolerance").value)
-            correction = (
-                yaw * float(self.get_parameter("lateral_yaw_gain").value)
-                if yaw_correction_enabled
-                else 0.0
-            )
             scan_before_motion = self._current_scan_sequence()
-            if abs(correction) >= yaw_tolerance:
-                if not self._rotate_open_loop(correction, deadline):
-                    return False
-            elif abs(yaw) >= yaw_tolerance:
-                self.get_logger().info(
-                    "late yaw correction disabled by C9 gate: "
-                    f"step={step} x={x:.3f} yaw={yaw:.3f}"
-                )
-
             drive_distance = min(
                 float(self.get_parameter("forward_step_distance").value),
                 max(x, 0.0),
@@ -349,8 +351,6 @@ class ShelfDetectionServer(Node):
                         f"estimated_remaining={estimated_remaining:.3f} "
                         f"locked_distance={locked_distance:.3f}"
                     )
-                    if not self._apply_pre_lock_yaw(yaw, deadline):
-                        return False
                     if locked_distance > 0.0 and not (
                         self._drive_forward_measured(
                             locked_distance, deadline
@@ -384,6 +384,124 @@ class ShelfDetectionServer(Node):
         self._publish_elevator_up()
         return True
 
+    def _align_at_safe_standoff(
+        self, initial_target: tuple, deadline: float
+    ) -> Optional[tuple]:
+        target = initial_target
+        retry_count = max(
+            1, int(self.get_parameter("alignment_retry_count").value)
+        )
+        standoff = max(
+            0.0,
+            float(
+                self.get_parameter("alignment_standoff_distance").value
+            ),
+        )
+        position_tolerance = max(
+            0.0,
+            float(
+                self.get_parameter("alignment_position_tolerance").value
+            ),
+        )
+        max_drive = max(
+            0.0,
+            float(
+                self.get_parameter("alignment_max_drive_distance").value
+            ),
+        )
+        yaw_tolerance = float(self.get_parameter("yaw_tolerance").value)
+        max_detected_yaw = float(
+            self.get_parameter("max_detected_yaw").value
+        )
+
+        for attempt in range(1, retry_count + 1):
+            if time.monotonic() >= deadline:
+                break
+            _, x, y, shelf_heading = target
+            if abs(shelf_heading) > max_detected_yaw:
+                self.get_logger().error(
+                    "safe-standoff alignment rejected: shelf heading "
+                    f"{shelf_heading:.3f} exceeds "
+                    f"{max_detected_yaw:.3f}"
+                )
+                return None
+
+            error_x, error_y = shelf_staging_error(
+                x, y, shelf_heading, standoff
+            )
+            position_error = math.hypot(error_x, error_y)
+            self.get_logger().info(
+                "safe-standoff alignment sample: "
+                f"attempt={attempt}/{retry_count} x={x:.3f} y={y:.3f} "
+                f"shelf_normal_yaw={shelf_heading:.3f} "
+                f"staging_error={position_error:.3f}"
+            )
+
+            scan_before_motion = self._current_scan_sequence()
+            if position_error > position_tolerance:
+                if max_drive <= 0.0:
+                    self.get_logger().error(
+                        "safe-standoff alignment rejected: maximum staging "
+                        "drive is not positive"
+                    )
+                    return None
+                travel_yaw = math.atan2(error_y, error_x)
+                if abs(travel_yaw) > max_detected_yaw:
+                    self.get_logger().error(
+                        "safe-standoff staging rejected: travel yaw "
+                        f"{travel_yaw:.3f} exceeds {max_detected_yaw:.3f}"
+                    )
+                    return None
+                if abs(travel_yaw) > yaw_tolerance and not (
+                    self._rotate_open_loop(travel_yaw, deadline)
+                ):
+                    return None
+                if not self._drive_forward_measured(
+                    min(position_error, max_drive), deadline
+                ):
+                    return None
+            elif not shelf_heading_aligned(
+                shelf_heading, yaw_tolerance
+            ):
+                correction = bounded_yaw_correction(
+                    shelf_heading,
+                    float(
+                        self.get_parameter("alignment_heading_gain").value
+                    ),
+                    float(
+                        self.get_parameter(
+                            "alignment_max_yaw_correction"
+                        ).value
+                    ),
+                )
+                if abs(correction) <= 0.0 or not self._rotate_open_loop(
+                    correction, deadline
+                ):
+                    return None
+            else:
+                self.get_logger().info(
+                    "safe-standoff alignment accepted: "
+                    f"position_error={position_error:.3f} "
+                    f"shelf_normal_yaw={shelf_heading:.3f}"
+                )
+                return target
+
+            target = self._recover_cart_frame_after_motion(
+                scan_before_motion, deadline
+            )
+            if target is None:
+                self.get_logger().error(
+                    "safe-standoff alignment stopped: fresh shelf "
+                    "observation unavailable"
+                )
+                return None
+
+        self._publish_stop()
+        self.get_logger().error(
+            "safe-standoff alignment exhausted before entering tolerance"
+        )
+        return None
+
     def _recover_cart_frame_after_motion(
         self, after_sequence: int, deadline: float
     ) -> Optional[tuple]:
@@ -414,27 +532,6 @@ class ShelfDetectionServer(Node):
                 f"retry={retry}/{retry_count}"
             )
         return None
-
-    def _apply_pre_lock_yaw(self, yaw: float, deadline: float) -> bool:
-        correction = c9_pre_lock_yaw_correction(
-            yaw,
-            float(self.get_parameter("lateral_yaw_gain").value),
-            float(
-                self.get_parameter("pre_lock_max_yaw_correction").value
-            ),
-        )
-        tolerance = float(self.get_parameter("yaw_tolerance").value)
-        if abs(correction) < tolerance:
-            self.get_logger().info(
-                "pre-lock yaw correction skipped: "
-                f"raw_yaw={yaw:.3f} correction={correction:.3f}"
-            )
-            return True
-        self.get_logger().warning(
-            "applying one pre-lock yaw correction from last trusted cart: "
-            f"raw_yaw={yaw:.3f} correction={correction:.3f}"
-        )
-        return self._rotate_open_loop(correction, deadline)
 
     def _lookup_odom_xy(self) -> Optional[tuple]:
         odom_frame = str(self.get_parameter("odom_frame").value)
