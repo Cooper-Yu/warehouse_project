@@ -113,39 +113,40 @@ def _wait_for_detection(
 
     service_type = _load_shelf_service_type()
     client = navigator.create_client(service_type, service_name)
-    deadline = time.monotonic() + timeout
-    while rclpy.ok() and not client.wait_for_service(timeout_sec=0.2):
-        if time.monotonic() >= deadline:
-            navigator.get_logger().error(
-                "Shelf detection service was not available"
-            )
-            return False
-
-    request = service_type.Request()
-    request.attach_to_shelf = False
-    future = client.call_async(request)
-    while rclpy.ok() and not future.done():
-        if time.monotonic() >= deadline:
-            navigator.get_logger().error(
-                "Shelf detection service timed out"
-            )
-            return False
-        rclpy.spin_once(navigator, timeout_sec=0.1)
-
-    if (
-        not future.done()
-        or not future.result()
-        or not future.result().complete
-    ):
-        navigator.get_logger().error(
-            "Shelf detection did not complete successfully"
-        )
-        return False
-
     buffer = tf2_ros.Buffer()
     listener = tf2_ros.TransformListener(buffer, navigator, spin_thread=False)
     try:
-        while rclpy.ok() and time.monotonic() < deadline:
+        service_deadline = time.monotonic() + timeout
+        while rclpy.ok() and not client.wait_for_service(timeout_sec=0.2):
+            if time.monotonic() >= service_deadline:
+                navigator.get_logger().error(
+                    "Shelf detection service was not available"
+                )
+                return False
+
+        request = service_type.Request()
+        request.attach_to_shelf = False
+        future = client.call_async(request)
+        while rclpy.ok() and not future.done():
+            if time.monotonic() >= service_deadline:
+                navigator.get_logger().error(
+                    "Shelf detection service timed out"
+                )
+                return False
+            rclpy.spin_once(navigator, timeout_sec=0.1)
+
+        if (
+            not future.done()
+            or not future.result()
+            or not future.result().complete
+        ):
+            navigator.get_logger().error(
+                "Shelf detection did not complete successfully"
+            )
+            return False
+
+        tf_deadline = time.monotonic() + timeout
+        while rclpy.ok() and time.monotonic() < tf_deadline:
             try:
                 buffer.lookup_transform(
                     base_frame, cart_frame, rclpy.time.Time()
