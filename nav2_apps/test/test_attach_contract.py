@@ -37,7 +37,8 @@ def test_attach_service_owns_motion_and_elevator_sequence():
 
     server_attach = _function(server_tree, "_perform_stepwise_attach")
     server_calls = _called_methods(server_attach)
-    assert "_drive_forward_open_loop" in server_calls
+    assert "_drive_forward_measured" in server_calls
+    assert "_apply_pre_lock_yaw" in server_calls
     assert "_publish_elevator_up" in server_calls
 
     mission_attach = _function(mission_tree, "_request_stepwise_attach")

@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from shelf_detection_server.server import (  # noqa: E402
     c9_center_lock_enabled,
     c9_locked_drive_distance,
+    c9_pre_lock_yaw_correction,
     c9_yaw_correction_enabled,
 )
 
@@ -48,8 +49,12 @@ def test_c9_policy_parameters_are_declared():
     assert declared["min_yaw_correction_distance"] == 0.55
     assert declared["center_lock_distance"] == 0.35
     assert declared["center_lock_min_steps"] == 2
-    assert declared["center_drive_scale"] == 1.5
+    assert declared["center_drive_scale"] == 1.0
     assert declared["cart_frame_retry_count"] == 6
+    assert declared["pre_lock_max_yaw_correction"] == 0.08
+    assert declared["odom_frame"] == "odom"
+    assert declared["odom_lookup_timeout"] == 1.0
+    assert declared["measured_drive_timeout_scale"] == 3.0
 
 
 def test_attach_loop_contains_center_lock_and_recovery_paths():
@@ -63,7 +68,8 @@ def test_attach_loop_contains_center_lock_and_recovery_paths():
     }
 
     assert "_recover_cart_frame_after_motion" in calls
-    assert "_drive_forward_open_loop" in calls
+    assert "_drive_forward_measured" in calls
+    assert "_apply_pre_lock_yaw" in calls
     assert "_publish_elevator_up" in calls
 
 
@@ -87,10 +93,57 @@ def test_cloud_failure_sample_enters_c9_center_lock():
         min_steps=2,
         lock_distance=0.35,
     )
-    assert c9_locked_drive_distance(0.292, 1.5) == pytest.approx(0.438)
+    assert c9_locked_drive_distance(0.292, 1.0) == pytest.approx(0.292)
 
 
 def test_late_yaw_is_disabled_but_early_yaw_is_allowed():
     assert c9_yaw_correction_enabled(1, 1.272, 3, 0.55)
     assert not c9_yaw_correction_enabled(3, 1.263, 3, 0.55)
     assert not c9_yaw_correction_enabled(2, 0.50, 3, 0.55)
+
+
+def test_last_trusted_cloud_sample_gets_one_capped_pre_lock_correction():
+    correction = c9_pre_lock_yaw_correction(-0.091, 0.4, 0.08)
+    assert correction == pytest.approx(-0.0364)
+    assert c9_pre_lock_yaw_correction(1.0, 0.4, 0.08) == 0.08
+    assert c9_pre_lock_yaw_correction(-1.0, 0.4, 0.08) == -0.08
+
+
+def test_measured_drive_reads_odom_and_always_stops():
+    tree = _server_tree()
+    measured = _function(tree, "_drive_forward_measured")
+    calls = {
+        node.func.attr
+        for node in ast.walk(measured)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+    }
+
+    assert "_wait_for_odom_xy" in calls
+    assert "_lookup_odom_xy" in calls
+    assert "_publish_stop" in calls
+    assert any(isinstance(node, ast.Try) for node in ast.walk(measured))
+
+
+def test_final_measured_drive_precedes_elevator_publish():
+    tree = _server_tree()
+    attach = _function(tree, "_perform_stepwise_attach")
+    method_calls = [
+        node
+        for node in ast.walk(attach)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+    ]
+    measured_lines = [
+        node.lineno
+        for node in method_calls
+        if node.func.attr == "_drive_forward_measured"
+    ]
+    elevator_line = next(
+        node.lineno
+        for node in method_calls
+        if node.func.attr == "_publish_elevator_up"
+    )
+
+    assert measured_lines
+    assert max(measured_lines) < elevator_line

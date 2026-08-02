@@ -55,6 +55,13 @@ def c9_locked_drive_distance(x: float, scale: float) -> float:
     return max(x, 0.0) * max(scale, 0.0)
 
 
+def c9_pre_lock_yaw_correction(
+    yaw: float, gain: float, max_abs_correction: float
+) -> float:
+    limit = max(max_abs_correction, 0.0)
+    return max(-limit, min(yaw * gain, limit))
+
+
 class ShelfDetectionServer(Node):
     def __init__(self) -> None:
         super().__init__("shelf_detection_server")
@@ -74,10 +81,14 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("center_lateral_tolerance", 0.08)
         self.declare_parameter("center_lock_distance", 0.35)
         self.declare_parameter("center_lock_min_steps", 2)
-        self.declare_parameter("center_drive_scale", 1.50)
+        self.declare_parameter("center_drive_scale", 1.0)
+        self.declare_parameter("pre_lock_max_yaw_correction", 0.08)
         self.declare_parameter("yaw_correction_steps", 3)
         self.declare_parameter("min_yaw_correction_distance", 0.55)
         self.declare_parameter("cart_frame_retry_count", 6)
+        self.declare_parameter("odom_frame", "odom")
+        self.declare_parameter("odom_lookup_timeout", 1.0)
+        self.declare_parameter("measured_drive_timeout_scale", 3.0)
         self.declare_parameter("final_drive_distance", 0.30)
         self.declare_parameter("movement_timeout", 45.0)
         self.declare_parameter("elevator_publish_count", 5)
@@ -322,7 +333,9 @@ class ShelfDetectionServer(Node):
                     f"locked_distance={locked_distance:.3f}; "
                     "close-range cart_frame re-detection is skipped"
                 )
-                if not self._drive_forward_open_loop(
+                if not self._apply_pre_lock_yaw(yaw, deadline):
+                    return False
+                if not self._drive_forward_measured(
                     locked_distance, deadline
                 ):
                     return False
@@ -367,7 +380,7 @@ class ShelfDetectionServer(Node):
                     "center distance"
                 )
                 return False
-            if not self._drive_forward_open_loop(drive_distance, deadline):
+            if not self._drive_forward_measured(drive_distance, deadline):
                 return False
 
             target = self._recover_cart_frame_after_motion(
@@ -395,8 +408,10 @@ class ShelfDetectionServer(Node):
                         f"estimated_remaining={estimated_remaining:.3f} "
                         f"locked_distance={locked_distance:.3f}"
                     )
+                    if not self._apply_pre_lock_yaw(yaw, deadline):
+                        return False
                     if locked_distance > 0.0 and not (
-                        self._drive_forward_open_loop(
+                        self._drive_forward_measured(
                             locked_distance, deadline
                         )
                     ):
@@ -422,7 +437,7 @@ class ShelfDetectionServer(Node):
         final_distance = float(
             self.get_parameter("final_drive_distance").value
         )
-        if not self._drive_forward_open_loop(final_distance, deadline):
+        if not self._drive_forward_measured(final_distance, deadline):
             return False
         self._publish_stop()
         self._publish_elevator_up()
@@ -459,6 +474,122 @@ class ShelfDetectionServer(Node):
             )
         return None
 
+    def _apply_pre_lock_yaw(self, yaw: float, deadline: float) -> bool:
+        correction = c9_pre_lock_yaw_correction(
+            yaw,
+            float(self.get_parameter("lateral_yaw_gain").value),
+            float(
+                self.get_parameter("pre_lock_max_yaw_correction").value
+            ),
+        )
+        tolerance = float(self.get_parameter("yaw_tolerance").value)
+        if abs(correction) < tolerance:
+            self.get_logger().info(
+                "pre-lock yaw correction skipped: "
+                f"raw_yaw={yaw:.3f} correction={correction:.3f}"
+            )
+            return True
+        self.get_logger().warning(
+            "applying one pre-lock yaw correction from last trusted cart: "
+            f"raw_yaw={yaw:.3f} correction={correction:.3f}"
+        )
+        return self._rotate_open_loop(correction, deadline)
+
+    def _lookup_odom_xy(self) -> Optional[tuple]:
+        odom_frame = str(self.get_parameter("odom_frame").value)
+        base_frame = str(self.get_parameter("target_base_frame").value)
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                odom_frame, base_frame, rclpy.time.Time()
+            )
+            return (
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+            )
+        except TransformException:
+            return None
+
+    def _wait_for_odom_xy(self, deadline: float) -> Optional[tuple]:
+        lookup_timeout = max(
+            0.0, float(self.get_parameter("odom_lookup_timeout").value)
+        )
+        lookup_deadline = min(deadline, time.monotonic() + lookup_timeout)
+        while rclpy.ok() and time.monotonic() < lookup_deadline:
+            position = self._lookup_odom_xy()
+            if position is not None:
+                return position
+            time.sleep(0.05)
+        return None
+
+    def _drive_forward_measured(
+        self, distance: float, deadline: float
+    ) -> bool:
+        speed = float(self.get_parameter("forward_speed").value)
+        if distance <= 0.0:
+            self._publish_stop()
+            return True
+        if speed <= 0.0 or time.monotonic() >= deadline:
+            return False
+
+        start = self._wait_for_odom_xy(deadline)
+        if start is None:
+            self.get_logger().error(
+                "measured forward drive rejected: odom TF unavailable"
+            )
+            return False
+
+        timeout_scale = max(
+            1.0,
+            float(
+                self.get_parameter("measured_drive_timeout_scale").value
+            ),
+        )
+        motion_deadline = min(
+            deadline,
+            time.monotonic() + max(2.0, distance / speed * timeout_scale),
+        )
+        lookup_timeout = max(
+            0.0, float(self.get_parameter("odom_lookup_timeout").value)
+        )
+        last_odom_time = time.monotonic()
+        traveled = 0.0
+        command = Twist()
+        command.linear.x = speed
+        self.get_logger().info(
+            "measured forward drive started: "
+            f"target_distance={distance:.3f} speed={speed:.3f}"
+        )
+        try:
+            while rclpy.ok() and time.monotonic() < motion_deadline:
+                position = self._lookup_odom_xy()
+                if position is not None:
+                    last_odom_time = time.monotonic()
+                    traveled = math.hypot(
+                        position[0] - start[0], position[1] - start[1]
+                    )
+                    if traveled >= distance:
+                        self.get_logger().info(
+                            "measured forward drive complete: "
+                            f"target={distance:.3f} "
+                            f"traveled={traveled:.3f}"
+                        )
+                        return True
+                elif time.monotonic() - last_odom_time >= lookup_timeout:
+                    self.get_logger().error(
+                        "measured forward drive stopped: odom TF stale"
+                    )
+                    return False
+                self._cmd_vel_pub.publish(command)
+                time.sleep(0.05)
+        finally:
+            self._publish_stop()
+
+        self.get_logger().error(
+            "measured forward drive stopped before target: "
+            f"target={distance:.3f} traveled={traveled:.3f}"
+        )
+        return False
+
     def _rotate_open_loop(self, yaw: float, deadline: float) -> bool:
         speed = float(self.get_parameter("rotate_speed").value)
         if speed <= 0.0 or time.monotonic() >= deadline:
@@ -470,30 +601,6 @@ class ShelfDetectionServer(Node):
         command.angular.z = math.copysign(speed, yaw)
         self.get_logger().info(
             f"bounded yaw correction: yaw={yaw:.3f} duration={duration:.3f}"
-        )
-        try:
-            end = time.monotonic() + duration
-            while rclpy.ok() and time.monotonic() < end:
-                self._cmd_vel_pub.publish(command)
-                time.sleep(0.05)
-        finally:
-            self._publish_stop()
-        return True
-
-    def _drive_forward_open_loop(
-        self, distance: float, deadline: float
-    ) -> bool:
-        speed = float(self.get_parameter("forward_speed").value)
-        if distance <= 0.0 or speed <= 0.0 or time.monotonic() >= deadline:
-            return False
-        duration = distance / speed
-        if time.monotonic() + duration > deadline:
-            return False
-        command = Twist()
-        command.linear.x = speed
-        self.get_logger().info(
-            "bounded forward step: "
-            f"distance={distance:.3f} duration={duration:.3f}"
         )
         try:
             end = time.monotonic() + duration
