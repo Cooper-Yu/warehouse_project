@@ -517,6 +517,15 @@ class ShelfDetectionServer(Node):
                         f"{travel_yaw:.3f} exceeds {max_detected_yaw:.3f}"
                     )
                     return None
+                staging_entry_odom_yaw = (
+                    self._wait_for_stable_odom_yaw(deadline)
+                )
+                if staging_entry_odom_yaw is None:
+                    self.get_logger().error(
+                        "safe-standoff staging rejected: entry odom "
+                        "heading did not settle"
+                    )
+                    return None
                 if abs(travel_yaw) > yaw_tolerance and not (
                     self._rotate_measured(travel_yaw, deadline)
                 ):
@@ -527,6 +536,32 @@ class ShelfDetectionServer(Node):
                     return None
                 if not self._drive_forward_measured(
                     min(position_error, max_drive), deadline
+                ):
+                    return None
+                post_drive_odom_yaw = self._wait_for_stable_odom_yaw(
+                    deadline
+                )
+                if post_drive_odom_yaw is None:
+                    self.get_logger().error(
+                        "safe-standoff staging rejected: post-drive odom "
+                        "heading did not settle"
+                    )
+                    return None
+                restore_yaw = normalize_angle(
+                    staging_entry_odom_yaw - post_drive_odom_yaw
+                )
+                self.get_logger().info(
+                    "safe-standoff staging heading restore: "
+                    f"entry_odom_yaw={staging_entry_odom_yaw:.3f} "
+                    f"post_drive_odom_yaw={post_drive_odom_yaw:.3f} "
+                    f"restore_yaw={restore_yaw:.3f}"
+                )
+                if abs(restore_yaw) > yaw_tolerance and not (
+                    self._rotate_measured(restore_yaw, deadline)
+                ):
+                    return None
+                if abs(restore_yaw) > yaw_tolerance and (
+                    self._wait_for_stable_odom_yaw(deadline) is None
                 ):
                     return None
             elif not shelf_heading_aligned(

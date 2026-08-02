@@ -54,7 +54,13 @@ class _Logger:
 
 
 class _AlignmentHarness:
-    def __init__(self, recovered_targets, retry_count=6):
+    def __init__(
+        self,
+        recovered_targets,
+        retry_count=6,
+        stable_yaws=None,
+        failed_rotation_index=None,
+    ):
         self.parameters = {
             "rotate_speed": 0.20,
             "alignment_retry_count": retry_count,
@@ -81,6 +87,8 @@ class _AlignmentHarness:
         self.elevator_count = 0
         self.accepted_odom_yaw = 3.053559
         self.settle_count = 0
+        self.stable_yaws = list(stable_yaws or [])
+        self.failed_rotation_index = failed_rotation_index
 
     def get_parameter(self, name):
         return _Parameter(self.parameters[name])
@@ -93,7 +101,7 @@ class _AlignmentHarness:
 
     def _rotate_measured(self, yaw, _deadline, _speed_override=None):
         self.rotations.append(yaw)
-        return True
+        return len(self.rotations) != self.failed_rotation_index
 
     def _drive_forward_measured(self, distance, _deadline):
         self.drives.append(distance)
@@ -113,6 +121,8 @@ class _AlignmentHarness:
 
     def _wait_for_stable_odom_yaw(self, _deadline):
         self.settle_count += 1
+        if self.stable_yaws:
+            return self.stable_yaws.pop(0)
         return self.accepted_odom_yaw
 
     def _align_at_safe_standoff(self, target, deadline):
@@ -258,14 +268,17 @@ def test_alignment_sequence_reobserves_until_staging_and_heading_pass():
         1.460, 0.176, -0.066, 1.0
     )
     travel_yaw = math.atan2(staging_y, staging_x)
-    heading_after_staging = -0.066 - travel_yaw
-    heading_after_first_correction = heading_after_staging + 0.40
+    restored_heading = -0.066
+    heading_after_first_correction = restored_heading + 0.033
+    heading_after_second_correction = (
+        heading_after_first_correction + 0.0165
+    )
     targets = [
         (
             "base",
-            math.cos(heading_after_staging),
-            math.sin(heading_after_staging),
-            heading_after_staging,
+            math.cos(restored_heading),
+            math.sin(restored_heading),
+            restored_heading,
         ),
         (
             "base",
@@ -273,10 +286,32 @@ def test_alignment_sequence_reobserves_until_staging_and_heading_pass():
             math.sin(heading_after_first_correction),
             heading_after_first_correction,
         ),
-        ("base", 1.0, 0.0, 0.0),
-        ("base", 1.0, 0.0, 0.0),
+        (
+            "base",
+            math.cos(heading_after_second_correction),
+            math.sin(heading_after_second_correction),
+            heading_after_second_correction,
+        ),
+        (
+            "base",
+            math.cos(heading_after_second_correction),
+            math.sin(heading_after_second_correction),
+            heading_after_second_correction,
+        ),
     ]
-    harness = _AlignmentHarness(targets)
+    harness = _AlignmentHarness(
+        targets,
+        stable_yaws=[
+            0.0,
+            travel_yaw,
+            travel_yaw,
+            0.0,
+            0.0,
+            0.0,
+            3.053559,
+            3.053559,
+        ],
+    )
 
     result = harness._align_at_safe_standoff(
         ("base", 1.460, 0.176, -0.066),
@@ -284,16 +319,76 @@ def test_alignment_sequence_reobserves_until_staging_and_heading_pass():
     )
 
     assert result == (
-        ("base", 1.0, 0.0, 0.0),
+        targets[-1],
         harness.accepted_odom_yaw,
     )
     assert harness.drives == pytest.approx(
         [math.hypot(staging_x, staging_y)]
     )
     assert harness.rotations == pytest.approx(
-        [travel_yaw, -0.40, heading_after_first_correction * 0.50]
+        [travel_yaw, -travel_yaw, -0.033, -0.0165]
     )
-    assert harness.settle_count == 5
+    assert harness.settle_count == 8
+
+
+def test_staging_restores_pre_motion_odom_heading_before_reobservation():
+    error_x, error_y = shelf_staging_error(
+        1.397, 0.235, -0.004, 1.0
+    )
+    travel_yaw = math.atan2(error_y, error_x)
+    restored_target = ("base", 1.0, 0.0, 0.0)
+    harness = _AlignmentHarness(
+        [restored_target, restored_target],
+        stable_yaws=[
+            -3.068,
+            -2.527,
+            -2.527,
+            -3.068,
+            3.053559,
+            3.053559,
+        ],
+    )
+
+    result = harness._align_at_safe_standoff(
+        ("base", 1.397, 0.235, -0.004),
+        time.monotonic() + 10.0,
+    )
+
+    assert result == (restored_target, harness.accepted_odom_yaw)
+    assert harness.drives == pytest.approx(
+        [math.hypot(error_x, error_y)]
+    )
+    assert harness.rotations == pytest.approx(
+        [travel_yaw, -0.541], abs=0.01
+    )
+    assert harness.settle_count == 6
+
+
+def test_staging_restore_failure_stops_before_reobservation():
+    error_x, error_y = shelf_staging_error(
+        1.397, 0.235, -0.004, 1.0
+    )
+    travel_yaw = math.atan2(error_y, error_x)
+    harness = _AlignmentHarness(
+        [],
+        stable_yaws=[0.0, travel_yaw, travel_yaw],
+        failed_rotation_index=2,
+    )
+
+    result = harness._align_at_safe_standoff(
+        ("base", 1.397, 0.235, -0.004),
+        time.monotonic() + 10.0,
+    )
+
+    assert result is None
+    assert harness.drives == pytest.approx(
+        [math.hypot(error_x, error_y)]
+    )
+    assert harness.rotations == pytest.approx(
+        [travel_yaw, -travel_yaw]
+    )
+    assert harness.recovered_targets == []
+    assert harness.elevator_count == 0
 
 
 def test_alignment_exhaustion_stops_and_blocks_attach_elevator():
