@@ -25,6 +25,7 @@ from warehouse_interfaces.srv import GoToLoading
 from shelf_detection_server.leg_geometry import (
     LegPairMeasurement,
     detect_leg_pair,
+    normalize_angle,
     shelf_normal_yaw,
 )
 
@@ -67,6 +68,17 @@ def shelf_staging_error(
     )
 
 
+def planar_yaw_from_quaternion(rotation) -> float:
+    """Return planar yaw from a geometry quaternion."""
+    sin_yaw = 2.0 * (
+        rotation.w * rotation.z + rotation.x * rotation.y
+    )
+    cos_yaw = 1.0 - 2.0 * (
+        rotation.y * rotation.y + rotation.z * rotation.z
+    )
+    return math.atan2(sin_yaw, cos_yaw)
+
+
 class ShelfDetectionServer(Node):
     def __init__(self) -> None:
         super().__init__("shelf_detection_server")
@@ -96,6 +108,8 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("odom_lookup_timeout", 1.0)
         self.declare_parameter("measured_drive_timeout_scale", 3.0)
+        self.declare_parameter("measured_rotation_timeout_scale", 3.0)
+        self.declare_parameter("measured_yaw_tolerance", 0.01)
         self.declare_parameter("final_drive_distance", 0.30)
         self.declare_parameter("movement_timeout", 55.0)
         self.declare_parameter("elevator_publish_count", 5)
@@ -453,7 +467,7 @@ class ShelfDetectionServer(Node):
                     )
                     return None
                 if abs(travel_yaw) > yaw_tolerance and not (
-                    self._rotate_open_loop(travel_yaw, deadline)
+                    self._rotate_measured(travel_yaw, deadline)
                 ):
                     return None
                 if not self._drive_forward_measured(
@@ -474,7 +488,7 @@ class ShelfDetectionServer(Node):
                         ).value
                     ),
                 )
-                if abs(correction) <= 0.0 or not self._rotate_open_loop(
+                if abs(correction) <= 0.0 or not self._rotate_measured(
                     correction, deadline
                 ):
                     return None
@@ -559,6 +573,31 @@ class ShelfDetectionServer(Node):
             time.sleep(0.05)
         return None
 
+    def _lookup_odom_yaw(self) -> Optional[float]:
+        odom_frame = str(self.get_parameter("odom_frame").value)
+        base_frame = str(self.get_parameter("target_base_frame").value)
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                odom_frame, base_frame, rclpy.time.Time()
+            )
+            return planar_yaw_from_quaternion(
+                transform.transform.rotation
+            )
+        except TransformException:
+            return None
+
+    def _wait_for_odom_yaw(self, deadline: float) -> Optional[float]:
+        lookup_timeout = max(
+            0.0, float(self.get_parameter("odom_lookup_timeout").value)
+        )
+        lookup_deadline = min(deadline, time.monotonic() + lookup_timeout)
+        while rclpy.ok() and time.monotonic() < lookup_deadline:
+            yaw = self._lookup_odom_yaw()
+            if yaw is not None:
+                return yaw
+            time.sleep(0.05)
+        return None
+
     def _drive_forward_measured(
         self, distance: float, deadline: float
     ) -> bool:
@@ -628,26 +667,83 @@ class ShelfDetectionServer(Node):
         )
         return False
 
-    def _rotate_open_loop(self, yaw: float, deadline: float) -> bool:
+    def _rotate_measured(self, yaw: float, deadline: float) -> bool:
         speed = float(self.get_parameter("rotate_speed").value)
+        target = abs(yaw)
+        tolerance = max(
+            0.0,
+            float(self.get_parameter("measured_yaw_tolerance").value),
+        )
+        if target <= tolerance:
+            self._publish_stop()
+            return True
         if speed <= 0.0 or time.monotonic() >= deadline:
+            self._publish_stop()
             return False
-        duration = abs(yaw) / speed
-        if time.monotonic() + duration > deadline:
+
+        start = self._wait_for_odom_yaw(deadline)
+        if start is None:
+            self._publish_stop()
+            self.get_logger().error(
+                "measured yaw rejected: odom TF unavailable"
+            )
             return False
+
+        timeout_scale = max(
+            1.0,
+            float(
+                self.get_parameter(
+                    "measured_rotation_timeout_scale"
+                ).value
+            ),
+        )
+        motion_deadline = min(
+            deadline,
+            time.monotonic() + max(2.0, target / speed * timeout_scale),
+        )
+        lookup_timeout = max(
+            0.0, float(self.get_parameter("odom_lookup_timeout").value)
+        )
+        last_odom_time = time.monotonic()
+        last_yaw = start
+        traveled = 0.0
+        direction = math.copysign(1.0, yaw)
         command = Twist()
-        command.angular.z = math.copysign(speed, yaw)
+        command.angular.z = direction * speed
         self.get_logger().info(
-            f"bounded yaw correction: yaw={yaw:.3f} duration={duration:.3f}"
+            "measured yaw correction started: "
+            f"target={yaw:.3f} speed={speed:.3f}"
         )
         try:
-            end = time.monotonic() + duration
-            while rclpy.ok() and time.monotonic() < end:
+            while rclpy.ok() and time.monotonic() < motion_deadline:
+                current_yaw = self._lookup_odom_yaw()
+                if current_yaw is not None:
+                    last_odom_time = time.monotonic()
+                    delta = normalize_angle(current_yaw - last_yaw)
+                    last_yaw = current_yaw
+                    traveled += direction * delta
+                    if traveled >= target - tolerance:
+                        self.get_logger().info(
+                            "measured yaw correction complete: "
+                            f"target={yaw:.3f} "
+                            f"traveled={direction * traveled:.3f}"
+                        )
+                        return True
+                elif time.monotonic() - last_odom_time >= lookup_timeout:
+                    self.get_logger().error(
+                        "measured yaw stopped: odom TF stale"
+                    )
+                    return False
                 self._cmd_vel_pub.publish(command)
                 time.sleep(0.05)
         finally:
             self._publish_stop()
-        return True
+
+        self.get_logger().error(
+            "measured yaw stopped before target: "
+            f"target={yaw:.3f} traveled={direction * traveled:.3f}"
+        )
+        return False
 
     def _publish_stop(self) -> None:
         self._cmd_vel_pub.publish(Twist())

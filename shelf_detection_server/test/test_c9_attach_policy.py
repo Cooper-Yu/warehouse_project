@@ -13,6 +13,7 @@ from shelf_detection_server.server import (  # noqa: E402
     bounded_yaw_correction,
     c9_center_lock_enabled,
     c9_locked_drive_distance,
+    planar_yaw_from_quaternion,
     shelf_heading_aligned,
     shelf_staging_error,
 )
@@ -76,7 +77,7 @@ class _AlignmentHarness:
     def _current_scan_sequence(self):
         return 1
 
-    def _rotate_open_loop(self, yaw, _deadline):
+    def _rotate_measured(self, yaw, _deadline):
         self.rotations.append(yaw)
         return True
 
@@ -128,6 +129,8 @@ def test_c9_policy_parameters_are_declared():
     assert declared["odom_frame"] == "odom"
     assert declared["odom_lookup_timeout"] == 1.0
     assert declared["measured_drive_timeout_scale"] == 3.0
+    assert declared["measured_rotation_timeout_scale"] == 3.0
+    assert declared["measured_yaw_tolerance"] == 0.01
 
 
 def test_attach_loop_contains_center_lock_and_recovery_paths():
@@ -299,6 +302,163 @@ def test_measured_drive_reads_odom_and_always_stops():
     assert any(isinstance(node, ast.Try) for node in ast.walk(measured))
 
 
+def test_measured_yaw_reads_odom_and_always_stops():
+    tree = _server_tree()
+    measured = _function(tree, "_rotate_measured")
+    calls = {
+        node.func.attr
+        for node in ast.walk(measured)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+    }
+    named_calls = {
+        node.func.id
+        for node in ast.walk(measured)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+    }
+
+    assert "_wait_for_odom_yaw" in calls
+    assert "_lookup_odom_yaw" in calls
+    assert "_publish_stop" in calls
+    assert "normalize_angle" in named_calls
+    assert any(isinstance(node, ast.Try) for node in ast.walk(measured))
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, duration):
+        self.now += duration
+
+
+class _Publisher:
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message)
+
+
+class _RotationHarness:
+    def __init__(self, start_yaw, yaw_samples):
+        self.parameters = {
+            "rotate_speed": 0.20,
+            "measured_yaw_tolerance": 0.01,
+            "measured_rotation_timeout_scale": 3.0,
+            "odom_lookup_timeout": 0.10,
+        }
+        self.start_yaw = start_yaw
+        self.yaw_samples = list(yaw_samples)
+        self.publisher = _Publisher()
+        self._cmd_vel_pub = self.publisher
+        self.stop_count = 0
+
+    def get_parameter(self, name):
+        return _Parameter(self.parameters[name])
+
+    def get_logger(self):
+        return _Logger()
+
+    def _wait_for_odom_yaw(self, _deadline):
+        return self.start_yaw
+
+    def _lookup_odom_yaw(self):
+        if not self.yaw_samples:
+            return None
+        return self.yaw_samples.pop(0)
+
+    def _publish_stop(self):
+        self.stop_count += 1
+
+    def rotate(self, yaw, deadline):
+        from shelf_detection_server.server import ShelfDetectionServer
+
+        return ShelfDetectionServer._rotate_measured(self, yaw, deadline)
+
+
+@pytest.mark.parametrize(
+    "target,start,samples,command_sign",
+    [
+        (0.20, 3.10, [-3.12, -3.05, -2.98], 1.0),
+        (-0.20, -3.10, [3.12, 3.05, 2.98], -1.0),
+    ],
+)
+def test_measured_yaw_accumulates_wrap_safe_rotation(
+    monkeypatch, target, start, samples, command_sign
+):
+    import shelf_detection_server.server as server_module
+
+    clock = _Clock()
+    harness = _RotationHarness(start, samples)
+    monkeypatch.setattr(server_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(server_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+
+    assert harness.rotate(target, deadline=10.0)
+    assert harness.stop_count == 1
+    assert harness.publisher.messages
+    assert all(
+        math.copysign(1.0, message.angular.z) == command_sign
+        for message in harness.publisher.messages
+    )
+
+
+def test_measured_yaw_stale_odom_stops_and_fails(monkeypatch):
+    import shelf_detection_server.server as server_module
+
+    clock = _Clock()
+    harness = _RotationHarness(0.0, [])
+    monkeypatch.setattr(server_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(server_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+
+    assert not harness.rotate(0.20, deadline=10.0)
+    assert harness.stop_count == 1
+
+
+def test_measured_yaw_unavailable_initial_odom_stops(monkeypatch):
+    import shelf_detection_server.server as server_module
+
+    clock = _Clock()
+    harness = _RotationHarness(None, [])
+    monkeypatch.setattr(server_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(server_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+
+    assert not harness.rotate(0.20, deadline=10.0)
+    assert harness.stop_count == 1
+    assert not harness.publisher.messages
+
+
+def test_measured_yaw_deadline_stops_before_target(monkeypatch):
+    import shelf_detection_server.server as server_module
+
+    clock = _Clock()
+    harness = _RotationHarness(0.0, [0.0] * 20)
+    monkeypatch.setattr(server_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(server_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+
+    assert not harness.rotate(0.20, deadline=0.20)
+    assert harness.stop_count == 1
+    assert harness.publisher.messages
+
+
+def test_planar_yaw_from_quaternion():
+    class Quaternion:
+        x = 0.0
+        y = 0.0
+        z = math.sin(-0.70 / 2.0)
+        w = math.cos(-0.70 / 2.0)
+
+    assert planar_yaw_from_quaternion(Quaternion()) == pytest.approx(-0.70)
+
+
 def test_final_measured_drive_precedes_elevator_publish():
     tree = _server_tree()
     attach = _function(tree, "_perform_stepwise_attach")
@@ -339,7 +499,7 @@ def test_safe_standoff_alignment_reobserves_after_each_motion():
         and isinstance(node.func, ast.Name)
     }
 
-    assert "_rotate_open_loop" in calls
+    assert "_rotate_measured" in calls
     assert "_drive_forward_measured" in calls
     assert "_recover_cart_frame_after_motion" in calls
     assert "shelf_staging_error" in named_calls
