@@ -88,6 +88,31 @@ def shelf_staging_error(
     )
 
 
+def staging_motion_command(
+    error_x: float,
+    error_y: float,
+    max_forward_yaw: float,
+    max_reverse_distance: float,
+    max_reverse_yaw: float,
+) -> Optional[tuple]:
+    """Return bounded yaw, signed distance, and staging motion mode."""
+    distance = math.hypot(error_x, error_y)
+    if distance <= 0.0:
+        return 0.0, 0.0, "forward"
+
+    forward_yaw = math.atan2(error_y, error_x)
+    if abs(forward_yaw) <= max(max_forward_yaw, 0.0):
+        return forward_yaw, distance, "forward"
+
+    reverse_yaw = normalize_angle(forward_yaw + math.pi)
+    if (
+        distance <= max(max_reverse_distance, 0.0)
+        and abs(reverse_yaw) <= max(max_reverse_yaw, 0.0)
+    ):
+        return reverse_yaw, -distance, "reverse"
+    return None
+
+
 def planar_yaw_from_quaternion(rotation) -> float:
     """Return planar yaw from a geometry quaternion."""
     sin_yaw = 2.0 * (
@@ -124,6 +149,9 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("alignment_max_travel_yaw", 1.20)
         self.declare_parameter("alignment_short_drive_distance", 0.20)
         self.declare_parameter("alignment_short_forward_speed", 0.05)
+        self.declare_parameter("alignment_max_reverse_distance", 0.15)
+        self.declare_parameter("alignment_max_reverse_yaw", 1.20)
+        self.declare_parameter("alignment_reverse_speed", 0.03)
         self.declare_parameter("forward_step_distance", 0.20)
         self.declare_parameter("center_distance_tolerance", 0.20)
         self.declare_parameter("center_lateral_tolerance", 0.08)
@@ -493,6 +521,24 @@ class ShelfDetectionServer(Node):
                 ).value
             ),
         )
+        max_reverse_distance = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "alignment_max_reverse_distance"
+                ).value
+            ),
+        )
+        max_reverse_yaw = max(
+            0.0,
+            float(
+                self.get_parameter("alignment_max_reverse_yaw").value
+            ),
+        )
+        reverse_speed = max(
+            0.0,
+            float(self.get_parameter("alignment_reverse_speed").value),
+        )
         yaw_tolerance = float(self.get_parameter("yaw_tolerance").value)
         max_detected_yaw = float(
             self.get_parameter("max_detected_yaw").value
@@ -539,14 +585,37 @@ class ShelfDetectionServer(Node):
                         "drive is not positive"
                     )
                     return None
-                travel_yaw = math.atan2(error_y, error_x)
-                if abs(travel_yaw) > max_travel_yaw:
+                motion = staging_motion_command(
+                    error_x,
+                    error_y,
+                    max_travel_yaw,
+                    max_reverse_distance,
+                    max_reverse_yaw,
+                )
+                if motion is None:
+                    forward_yaw = math.atan2(error_y, error_x)
+                    reverse_yaw = normalize_angle(forward_yaw + math.pi)
                     self.get_logger().error(
                         "safe-standoff staging rejected: travel yaw "
-                        f"{travel_yaw:.3f} exceeds "
-                        f"{max_travel_yaw:.3f}"
+                        f"{forward_yaw:.3f} exceeds {max_travel_yaw:.3f}; "
+                        "reverse equivalent rejected: "
+                        f"distance={position_error:.3f}/"
+                        f"{max_reverse_distance:.3f} "
+                        f"yaw={reverse_yaw:.3f}/{max_reverse_yaw:.3f}"
                     )
                     return None
+                travel_yaw, signed_distance, motion_mode = motion
+                if motion_mode == "reverse":
+                    minimum_safe_x = max(
+                        standoff - max_reverse_distance, 0.0
+                    )
+                    if x < minimum_safe_x:
+                        self.get_logger().error(
+                            "safe-standoff reverse staging rejected: "
+                            f"shelf x={x:.3f} below safe minimum "
+                            f"{minimum_safe_x:.3f}"
+                        )
+                        return None
                 staging_entry_odom_yaw = (
                     self._wait_for_stable_odom_yaw(deadline)
                 )
@@ -564,9 +633,21 @@ class ShelfDetectionServer(Node):
                     self._wait_for_stable_odom_yaw(deadline) is None
                 ):
                     return None
-                staging_distance = min(position_error, max_drive)
+                staging_distance = min(abs(signed_distance), max_drive)
+                signed_staging_distance = math.copysign(
+                    staging_distance, signed_distance
+                )
                 staging_speed = None
-                if staging_distance <= short_drive_distance:
+                if motion_mode == "reverse":
+                    staging_speed = reverse_speed
+                    self.get_logger().warning(
+                        "safe-standoff reverse-equivalent staging "
+                        "selected: "
+                        f"distance={signed_staging_distance:.3f} "
+                        f"yaw={travel_yaw:.3f} "
+                        f"speed={staging_speed:.3f}"
+                    )
+                elif staging_distance <= short_drive_distance:
                     staging_speed = short_forward_speed
                     self.get_logger().info(
                         "safe-standoff short staging speed selected: "
@@ -574,7 +655,7 @@ class ShelfDetectionServer(Node):
                         f"speed={staging_speed:.3f}"
                     )
                 if not self._drive_forward_measured(
-                    staging_distance,
+                    signed_staging_distance,
                     deadline,
                     staging_speed,
                 ):
@@ -892,15 +973,18 @@ class ShelfDetectionServer(Node):
         deadline: float,
         speed_override: Optional[float] = None,
     ) -> bool:
+        """Drive a signed distance using odom magnitude and always stop."""
         speed = (
             float(self.get_parameter("forward_speed").value)
             if speed_override is None
             else float(speed_override)
         )
-        if distance <= 0.0:
+        target_distance = abs(distance)
+        if target_distance <= 0.0:
             self._publish_stop()
             return True
         if speed <= 0.0 or time.monotonic() >= deadline:
+            self._publish_stop()
             return False
 
         start = self._wait_for_odom_xy(deadline)
@@ -918,7 +1002,8 @@ class ShelfDetectionServer(Node):
         )
         motion_deadline = min(
             deadline,
-            time.monotonic() + max(2.0, distance / speed * timeout_scale),
+            time.monotonic()
+            + max(2.0, target_distance / speed * timeout_scale),
         )
         lookup_timeout = max(
             0.0, float(self.get_parameter("odom_lookup_timeout").value)
@@ -926,10 +1011,13 @@ class ShelfDetectionServer(Node):
         last_odom_time = time.monotonic()
         traveled = 0.0
         command = Twist()
-        command.linear.x = speed
+        direction = 1.0 if distance > 0.0 else -1.0
+        command.linear.x = direction * speed
+        motion_name = "forward" if direction > 0.0 else "reverse"
         self.get_logger().info(
-            "measured forward drive started: "
-            f"target_distance={distance:.3f} speed={speed:.3f}"
+            f"measured {motion_name} drive started: "
+            f"target_distance={distance:.3f} "
+            f"speed={command.linear.x:.3f}"
         )
         try:
             while rclpy.ok() and time.monotonic() < motion_deadline:
@@ -939,9 +1027,9 @@ class ShelfDetectionServer(Node):
                     traveled = math.hypot(
                         position[0] - start[0], position[1] - start[1]
                     )
-                    if traveled >= distance:
+                    if traveled >= target_distance:
                         self.get_logger().info(
-                            "measured forward drive complete: "
+                            f"measured {motion_name} drive complete: "
                             f"target={distance:.3f} "
                             f"traveled={traveled:.3f}"
                         )
@@ -957,7 +1045,7 @@ class ShelfDetectionServer(Node):
             self._publish_stop()
 
         self.get_logger().error(
-            "measured forward drive stopped before target: "
+            f"measured {motion_name} drive stopped before target: "
             f"target={distance:.3f} traveled={traveled:.3f}"
         )
         return False

@@ -14,9 +14,11 @@ from shelf_detection_server.server import (  # noqa: E402
     bounded_yaw_correction,
     c9_center_lock_enabled,
     c9_locked_drive_distance,
+    normalize_angle,
     planar_yaw_from_quaternion,
     shelf_heading_aligned,
     shelf_staging_error,
+    staging_motion_command,
 )
 
 
@@ -70,6 +72,9 @@ class _AlignmentHarness:
             "alignment_max_travel_yaw": 1.20,
             "alignment_short_drive_distance": 0.20,
             "alignment_short_forward_speed": 0.05,
+            "alignment_max_reverse_distance": 0.15,
+            "alignment_max_reverse_yaw": 1.20,
+            "alignment_reverse_speed": 0.03,
             "yaw_tolerance": 0.03,
             "max_detected_yaw": 0.60,
             "alignment_heading_gain": 1.0,
@@ -165,6 +170,9 @@ def test_c9_policy_parameters_are_declared():
     assert declared["alignment_max_travel_yaw"] == 1.20
     assert declared["alignment_short_drive_distance"] == 0.20
     assert declared["alignment_short_forward_speed"] == 0.05
+    assert declared["alignment_max_reverse_distance"] == 0.15
+    assert declared["alignment_max_reverse_yaw"] == 1.20
+    assert declared["alignment_reverse_speed"] == 0.03
     assert declared["movement_timeout"] == 75.0
     assert declared["center_lock_distance"] == 0.35
     assert declared["center_lock_min_steps"] == 2
@@ -450,6 +458,78 @@ def test_staging_travel_yaw_still_has_an_independent_bound():
         time.monotonic() + 10.0,
     )
 
+    assert result is None
+    assert harness.rotations == []
+    assert harness.drives == []
+
+
+def test_run2_side_rear_residual_uses_bounded_reverse_equivalent():
+    shelf_heading = -0.005
+    error_x, error_y = shelf_staging_error(
+        0.944, 0.078, shelf_heading, 1.0
+    )
+    forward_yaw = math.atan2(error_y, error_x)
+    reverse_yaw = normalize_angle(forward_yaw + math.pi)
+    distance = math.hypot(error_x, error_y)
+    aligned_target = ("base", 1.0, 0.0, 0.0)
+    harness = _AlignmentHarness(
+        [aligned_target, aligned_target],
+        stable_yaws=[
+            0.0,
+            reverse_yaw,
+            reverse_yaw,
+            0.0,
+            3.053559,
+            3.053559,
+        ],
+    )
+
+    result = harness._align_at_safe_standoff(
+        ("base", 0.944, 0.078, shelf_heading),
+        time.monotonic() + 10.0,
+    )
+
+    assert forward_yaw == pytest.approx(2.161, abs=0.01)
+    assert reverse_yaw == pytest.approx(-0.981, abs=0.01)
+    assert result == (aligned_target, harness.accepted_odom_yaw)
+    assert harness.drives == pytest.approx([-distance])
+    assert harness.drive_speeds == [0.03]
+    assert harness.rotations == pytest.approx(
+        [reverse_yaw, -reverse_yaw]
+    )
+
+
+def test_reverse_equivalent_rejects_distance_above_independent_bound():
+    travel_yaw = 2.20
+    distance = 0.16
+
+    assert staging_motion_command(
+        distance * math.cos(travel_yaw),
+        distance * math.sin(travel_yaw),
+        max_forward_yaw=1.20,
+        max_reverse_distance=0.15,
+        max_reverse_yaw=1.20,
+    ) is None
+
+
+def test_reverse_equivalent_rejects_shelf_inside_safe_standoff():
+    shelf_heading = 0.55
+    travel_yaw = 2.20
+    distance = 0.10
+    midpoint_x = math.cos(shelf_heading) + distance * math.cos(
+        travel_yaw
+    )
+    midpoint_y = math.sin(shelf_heading) + distance * math.sin(
+        travel_yaw
+    )
+    harness = _AlignmentHarness([])
+
+    result = harness._align_at_safe_standoff(
+        ("base", midpoint_x, midpoint_y, shelf_heading),
+        time.monotonic() + 10.0,
+    )
+
+    assert midpoint_x < 0.85
     assert result is None
     assert harness.rotations == []
     assert harness.drives == []
@@ -789,6 +869,63 @@ class _Publisher:
 
     def publish(self, message):
         self.messages.append(message)
+
+
+class _DriveHarness:
+    def __init__(self, xy_samples):
+        self.parameters = {
+            "forward_speed": 0.10,
+            "measured_drive_timeout_scale": 3.0,
+            "odom_lookup_timeout": 0.10,
+        }
+        self.xy_samples = list(xy_samples)
+        self.publisher = _Publisher()
+        self._cmd_vel_pub = self.publisher
+        self.stop_count = 0
+
+    def get_parameter(self, name):
+        return _Parameter(self.parameters[name])
+
+    def get_logger(self):
+        return _Logger()
+
+    def _wait_for_odom_xy(self, _deadline):
+        return 0.0, 0.0
+
+    def _lookup_odom_xy(self):
+        if not self.xy_samples:
+            return None
+        return self.xy_samples.pop(0)
+
+    def _publish_stop(self):
+        self.stop_count += 1
+
+    def drive(self, distance, deadline, speed_override=None):
+        from shelf_detection_server.server import ShelfDetectionServer
+
+        return ShelfDetectionServer._drive_forward_measured(
+            self, distance, deadline, speed_override
+        )
+
+
+def test_measured_signed_reverse_uses_negative_cmd_and_always_stops(
+    monkeypatch,
+):
+    import shelf_detection_server.server as server_module
+
+    clock = _Clock()
+    harness = _DriveHarness([(0.03, 0.0), (0.07, 0.0), (0.11, 0.0)])
+    monkeypatch.setattr(server_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(server_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+
+    assert harness.drive(-0.10, deadline=10.0, speed_override=0.03)
+    assert harness.stop_count == 1
+    assert harness.publisher.messages
+    assert all(
+        message.linear.x == pytest.approx(-0.03)
+        for message in harness.publisher.messages
+    )
 
 
 class _RotationHarness:
