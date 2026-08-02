@@ -1,7 +1,7 @@
 from enum import IntEnum
 from types import SimpleNamespace
 
-from nav2_apps.pose_config import optional_initial_pose
+from nav2_apps.pose_config import SIM_LOADING_POSE, optional_initial_pose
 from nav2_apps.result_gate import ExitCode, classify_task_result
 
 
@@ -47,3 +47,7 @@ def test_partial_initial_pose_is_rejected():
     except ValueError:
         return
     raise AssertionError("partial initial pose should be rejected")
+
+
+def test_sim_loading_pose_matches_cloud_calibration():
+    assert SIM_LOADING_POSE == (5.520, 0.041, -1.598)

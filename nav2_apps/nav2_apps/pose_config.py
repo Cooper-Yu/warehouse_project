@@ -3,6 +3,9 @@
 from typing import Any, Optional, Tuple
 
 
+SIM_LOADING_POSE = (5.520, 0.041, -1.598)
+
+
 def optional_initial_pose(args: Any) -> Optional[Tuple[float, float, float]]:
     """Return a complete optional initial pose or reject partial input."""
     values = (args.initial_x, args.initial_y, args.initial_yaw)

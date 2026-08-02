@@ -33,6 +33,28 @@ class LegCandidate:
     size: int
 
 
+def c9_yaw_correction_enabled(
+    step: int,
+    x: float,
+    correction_steps: int,
+    min_distance: float,
+) -> bool:
+    return step < correction_steps and x > min_distance
+
+
+def c9_center_lock_enabled(
+    step: int,
+    x: float,
+    min_steps: int,
+    lock_distance: float,
+) -> bool:
+    return step >= min_steps and x <= lock_distance
+
+
+def c9_locked_drive_distance(x: float, scale: float) -> float:
+    return max(x, 0.0) * max(scale, 0.0)
+
+
 class ShelfDetectionServer(Node):
     def __init__(self) -> None:
         super().__init__("shelf_detection_server")
@@ -50,6 +72,12 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("forward_step_distance", 0.20)
         self.declare_parameter("center_distance_tolerance", 0.20)
         self.declare_parameter("center_lateral_tolerance", 0.08)
+        self.declare_parameter("center_lock_distance", 0.35)
+        self.declare_parameter("center_lock_min_steps", 2)
+        self.declare_parameter("center_drive_scale", 1.50)
+        self.declare_parameter("yaw_correction_steps", 3)
+        self.declare_parameter("min_yaw_correction_distance", 0.55)
+        self.declare_parameter("cart_frame_retry_count", 6)
         self.declare_parameter("final_drive_distance", 0.30)
         self.declare_parameter("movement_timeout", 45.0)
         self.declare_parameter("elevator_publish_count", 5)
@@ -124,11 +152,16 @@ class ShelfDetectionServer(Node):
         return response
 
     def _wait_for_cart_frame(
-        self, after_sequence: Optional[int] = None
+        self,
+        after_sequence: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> Optional[tuple]:
-        deadline = time.monotonic() + float(
-            self.get_parameter("detection_timeout").value
+        timeout = (
+            float(self.get_parameter("detection_timeout").value)
+            if timeout_seconds is None
+            else timeout_seconds
         )
+        deadline = time.monotonic() + timeout
         while rclpy.ok() and time.monotonic() < deadline:
             if (
                 after_sequence is not None
@@ -240,6 +273,7 @@ class ShelfDetectionServer(Node):
         )
         target = initial_target
         step = 0
+        center_approach_complete = False
         while rclpy.ok() and time.monotonic() < deadline:
             frame_id, x, y = target
             self._publish_cart_frame(frame_id, x, y)
@@ -263,29 +297,69 @@ class ShelfDetectionServer(Node):
                 f"step={step} x={x:.3f} y={y:.3f} yaw={yaw:.3f}"
             )
             if x <= center_x and abs(y) <= center_y:
+                center_approach_complete = True
                 break
 
-            yaw_tolerance = float(self.get_parameter("yaw_tolerance").value)
-            if abs(yaw) >= yaw_tolerance:
-                scan_before_motion = self._current_scan_sequence()
-                correction = yaw * float(
-                    self.get_parameter("lateral_yaw_gain").value
+            center_lock_distance = float(
+                self.get_parameter("center_lock_distance").value
+            )
+            center_lock_min_steps = int(
+                self.get_parameter("center_lock_min_steps").value
+            )
+            if c9_center_lock_enabled(
+                step,
+                x,
+                center_lock_min_steps,
+                center_lock_distance,
+            ):
+                locked_distance = c9_locked_drive_distance(
+                    x,
+                    float(self.get_parameter("center_drive_scale").value),
                 )
+                self.get_logger().warning(
+                    "locking final center approach: "
+                    f"step={step} x={x:.3f} y={y:.3f} "
+                    f"locked_distance={locked_distance:.3f}; "
+                    "close-range cart_frame re-detection is skipped"
+                )
+                if not self._drive_forward_open_loop(
+                    locked_distance, deadline
+                ):
+                    return False
+                center_approach_complete = True
+                break
+
+            yaw_correction_steps = int(
+                self.get_parameter("yaw_correction_steps").value
+            )
+            min_yaw_distance = float(
+                self.get_parameter("min_yaw_correction_distance").value
+            )
+            yaw_correction_enabled = c9_yaw_correction_enabled(
+                step,
+                x,
+                yaw_correction_steps,
+                min_yaw_distance,
+            )
+            yaw_tolerance = float(self.get_parameter("yaw_tolerance").value)
+            correction = (
+                yaw * float(self.get_parameter("lateral_yaw_gain").value)
+                if yaw_correction_enabled
+                else 0.0
+            )
+            scan_before_motion = self._current_scan_sequence()
+            if abs(correction) >= yaw_tolerance:
                 if not self._rotate_open_loop(correction, deadline):
                     return False
-                target = self._wait_for_cart_frame(scan_before_motion)
-                if target is None:
-                    self.get_logger().error(
-                        "attach stopped: cart_frame unavailable after "
-                        "bounded yaw correction"
-                    )
-                    return False
-                step += 1
-                continue
+            elif abs(yaw) >= yaw_tolerance:
+                self.get_logger().info(
+                    "late yaw correction disabled by C9 gate: "
+                    f"step={step} x={x:.3f} yaw={yaw:.3f}"
+                )
 
             drive_distance = min(
                 float(self.get_parameter("forward_step_distance").value),
-                max(x - center_x, 0.0),
+                max(x, 0.0),
             )
             if drive_distance <= 0.0:
                 self.get_logger().error(
@@ -293,20 +367,56 @@ class ShelfDetectionServer(Node):
                     "center distance"
                 )
                 return False
-            scan_before_motion = self._current_scan_sequence()
             if not self._drive_forward_open_loop(drive_distance, deadline):
                 return False
 
-            target = self._wait_for_cart_frame(scan_before_motion)
+            target = self._recover_cart_frame_after_motion(
+                scan_before_motion, deadline
+            )
             if target is None:
+                estimated_remaining = max(x - drive_distance, 0.0)
+                if c9_center_lock_enabled(
+                    step,
+                    estimated_remaining,
+                    center_lock_min_steps,
+                    center_lock_distance,
+                ):
+                    locked_distance = c9_locked_drive_distance(
+                        estimated_remaining,
+                        float(
+                            self.get_parameter("center_drive_scale").value
+                        ),
+                    )
+                    self.get_logger().warning(
+                        "close-range detection recovery exhausted; "
+                        "locking from estimated remaining distance: "
+                        f"previous_x={x:.3f} "
+                        f"last_drive={drive_distance:.3f} "
+                        f"estimated_remaining={estimated_remaining:.3f} "
+                        f"locked_distance={locked_distance:.3f}"
+                    )
+                    if locked_distance > 0.0 and not (
+                        self._drive_forward_open_loop(
+                            locked_distance, deadline
+                        )
+                    ):
+                        return False
+                    center_approach_complete = True
+                    break
                 self.get_logger().error(
-                    "attach stopped: cart_frame unavailable after bounded step"
+                    "attach stopped: cart_frame recovery exhausted after "
+                    "bounded step"
                 )
                 return False
             step += 1
 
         if time.monotonic() >= deadline:
             self.get_logger().error("attach stopped: movement timeout")
+            return False
+        if not center_approach_complete:
+            self.get_logger().error(
+                "attach stopped before reaching or locking cart center"
+            )
             return False
 
         final_distance = float(
@@ -317,6 +427,37 @@ class ShelfDetectionServer(Node):
         self._publish_stop()
         self._publish_elevator_up()
         return True
+
+    def _recover_cart_frame_after_motion(
+        self, after_sequence: int, deadline: float
+    ) -> Optional[tuple]:
+        target = self._wait_for_cart_frame(
+            after_sequence, timeout_seconds=0.5
+        )
+        if target is not None:
+            return target
+
+        retry_count = max(
+            0, int(self.get_parameter("cart_frame_retry_count").value)
+        )
+        for retry in range(1, retry_count + 1):
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.3)
+            target = self._wait_for_cart_frame(
+                after_sequence, timeout_seconds=0.5
+            )
+            if target is not None:
+                self.get_logger().info(
+                    "cart_frame recovery accepted: "
+                    f"retry={retry}/{retry_count}"
+                )
+                return target
+            self.get_logger().warning(
+                "cart_frame recovery failed: "
+                f"retry={retry}/{retry_count}"
+            )
+        return None
 
     def _rotate_open_loop(self, yaw: float, deadline: float) -> bool:
         speed = float(self.get_parameter("rotate_speed").value)

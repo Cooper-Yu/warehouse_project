@@ -10,7 +10,7 @@ import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 
-from nav2_apps.pose_config import optional_initial_pose
+from nav2_apps.pose_config import SIM_LOADING_POSE, optional_initial_pose
 from nav2_apps.result_gate import ExitCode, classify_task_result
 
 
@@ -28,14 +28,16 @@ def _load_shelf_service_type():
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Send the Checkpoint 12 Slice 1 simulation goal. The course pose "
-            "coordinates must be supplied explicitly; this program does not "
-            "guess them."
+            "Send the Checkpoint 12 simulation loading goal and optionally "
+            "run the bounded shelf-attach slice. The calibrated simulation "
+            "pose may be overridden explicitly."
         )
     )
-    parser.add_argument("--loading-x", type=float, required=True)
-    parser.add_argument("--loading-y", type=float, required=True)
-    parser.add_argument("--loading-yaw", type=float, required=True)
+    parser.add_argument("--loading-x", type=float, default=SIM_LOADING_POSE[0])
+    parser.add_argument("--loading-y", type=float, default=SIM_LOADING_POSE[1])
+    parser.add_argument(
+        "--loading-yaw", type=float, default=SIM_LOADING_POSE[2]
+    )
     parser.add_argument("--initial-x", type=float)
     parser.add_argument("--initial-y", type=float)
     parser.add_argument("--initial-yaw", type=float)
