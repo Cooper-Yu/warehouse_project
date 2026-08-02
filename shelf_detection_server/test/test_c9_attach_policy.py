@@ -67,6 +67,9 @@ class _AlignmentHarness:
             "alignment_standoff_distance": 1.0,
             "alignment_position_tolerance": 0.08,
             "alignment_max_drive_distance": 0.75,
+            "alignment_max_travel_yaw": 1.20,
+            "alignment_short_drive_distance": 0.20,
+            "alignment_short_forward_speed": 0.05,
             "yaw_tolerance": 0.03,
             "max_detected_yaw": 0.60,
             "alignment_heading_gain": 1.0,
@@ -83,6 +86,7 @@ class _AlignmentHarness:
         self.recovered_targets = list(recovered_targets)
         self.rotations = []
         self.drives = []
+        self.drive_speeds = []
         self.stop_count = 0
         self.elevator_count = 0
         self.accepted_odom_yaw = 3.053559
@@ -103,8 +107,11 @@ class _AlignmentHarness:
         self.rotations.append(yaw)
         return len(self.rotations) != self.failed_rotation_index
 
-    def _drive_forward_measured(self, distance, _deadline):
+    def _drive_forward_measured(
+        self, distance, _deadline, speed_override=None
+    ):
         self.drives.append(distance)
+        self.drive_speeds.append(speed_override)
         return True
 
     def _recover_cart_frame_after_motion(self, _sequence, _deadline):
@@ -155,6 +162,9 @@ def test_c9_policy_parameters_are_declared():
     assert declared["alignment_position_tolerance"] == 0.08
     assert declared["alignment_retry_count"] == 6
     assert declared["alignment_max_drive_distance"] == 0.75
+    assert declared["alignment_max_travel_yaw"] == 1.20
+    assert declared["alignment_short_drive_distance"] == 0.20
+    assert declared["alignment_short_forward_speed"] == 0.05
     assert declared["movement_timeout"] == 55.0
     assert declared["center_lock_distance"] == 0.35
     assert declared["center_lock_min_steps"] == 2
@@ -390,6 +400,59 @@ def test_staging_restore_failure_stops_before_reobservation():
     )
     assert harness.recovered_targets == []
     assert harness.elevator_count == 0
+
+
+def test_cloud_lateral_residual_uses_independent_yaw_and_short_speed():
+    shelf_heading = -0.059
+    error_x, error_y = shelf_staging_error(
+        1.062, -0.188, shelf_heading, 1.0
+    )
+    travel_yaw = math.atan2(error_y, error_x)
+    aligned_target = ("base", 1.0, 0.0, 0.0)
+    harness = _AlignmentHarness(
+        [aligned_target, aligned_target],
+        stable_yaws=[
+            0.0,
+            travel_yaw,
+            travel_yaw,
+            0.0,
+            3.053559,
+            3.053559,
+        ],
+    )
+
+    result = harness._align_at_safe_standoff(
+        ("base", 1.062, -0.188, shelf_heading),
+        time.monotonic() + 10.0,
+    )
+
+    assert abs(travel_yaw) == pytest.approx(1.113, abs=0.01)
+    assert result == (aligned_target, harness.accepted_odom_yaw)
+    assert harness.drives == pytest.approx([math.hypot(error_x, error_y)])
+    assert harness.drive_speeds == [0.05]
+    assert harness.rotations == pytest.approx(
+        [travel_yaw, -travel_yaw]
+    )
+
+
+def test_staging_travel_yaw_still_has_an_independent_bound():
+    error_distance = 0.20
+    travel_yaw = 1.30
+    harness = _AlignmentHarness([])
+
+    result = harness._align_at_safe_standoff(
+        (
+            "base",
+            1.0 + error_distance * math.cos(travel_yaw),
+            error_distance * math.sin(travel_yaw),
+            0.0,
+        ),
+        time.monotonic() + 10.0,
+    )
+
+    assert result is None
+    assert harness.rotations == []
+    assert harness.drives == []
 
 
 def test_alignment_exhaustion_stops_and_blocks_attach_elevator():

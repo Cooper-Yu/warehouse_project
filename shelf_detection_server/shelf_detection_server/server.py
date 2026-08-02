@@ -121,6 +121,9 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("alignment_position_tolerance", 0.08)
         self.declare_parameter("alignment_retry_count", 6)
         self.declare_parameter("alignment_max_drive_distance", 0.75)
+        self.declare_parameter("alignment_max_travel_yaw", 1.20)
+        self.declare_parameter("alignment_short_drive_distance", 0.20)
+        self.declare_parameter("alignment_short_forward_speed", 0.05)
         self.declare_parameter("forward_step_distance", 0.20)
         self.declare_parameter("center_distance_tolerance", 0.20)
         self.declare_parameter("center_lateral_tolerance", 0.08)
@@ -466,6 +469,28 @@ class ShelfDetectionServer(Node):
                 self.get_parameter("alignment_max_drive_distance").value
             ),
         )
+        max_travel_yaw = max(
+            0.0,
+            float(
+                self.get_parameter("alignment_max_travel_yaw").value
+            ),
+        )
+        short_drive_distance = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "alignment_short_drive_distance"
+                ).value
+            ),
+        )
+        short_forward_speed = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "alignment_short_forward_speed"
+                ).value
+            ),
+        )
         yaw_tolerance = float(self.get_parameter("yaw_tolerance").value)
         max_detected_yaw = float(
             self.get_parameter("max_detected_yaw").value
@@ -513,10 +538,11 @@ class ShelfDetectionServer(Node):
                     )
                     return None
                 travel_yaw = math.atan2(error_y, error_x)
-                if abs(travel_yaw) > max_detected_yaw:
+                if abs(travel_yaw) > max_travel_yaw:
                     self.get_logger().error(
                         "safe-standoff staging rejected: travel yaw "
-                        f"{travel_yaw:.3f} exceeds {max_detected_yaw:.3f}"
+                        f"{travel_yaw:.3f} exceeds "
+                        f"{max_travel_yaw:.3f}"
                     )
                     return None
                 staging_entry_odom_yaw = (
@@ -536,8 +562,19 @@ class ShelfDetectionServer(Node):
                     self._wait_for_stable_odom_yaw(deadline) is None
                 ):
                     return None
+                staging_distance = min(position_error, max_drive)
+                staging_speed = None
+                if staging_distance <= short_drive_distance:
+                    staging_speed = short_forward_speed
+                    self.get_logger().info(
+                        "safe-standoff short staging speed selected: "
+                        f"distance={staging_distance:.3f} "
+                        f"speed={staging_speed:.3f}"
+                    )
                 if not self._drive_forward_measured(
-                    min(position_error, max_drive), deadline
+                    staging_distance,
+                    deadline,
+                    staging_speed,
                 ):
                     return None
                 post_drive_odom_yaw = self._wait_for_stable_odom_yaw(
@@ -848,9 +885,16 @@ class ShelfDetectionServer(Node):
         return True
 
     def _drive_forward_measured(
-        self, distance: float, deadline: float
+        self,
+        distance: float,
+        deadline: float,
+        speed_override: Optional[float] = None,
     ) -> bool:
-        speed = float(self.get_parameter("forward_speed").value)
+        speed = (
+            float(self.get_parameter("forward_speed").value)
+            if speed_override is None
+            else float(speed_override)
+        )
         if distance <= 0.0:
             self._publish_stop()
             return True
