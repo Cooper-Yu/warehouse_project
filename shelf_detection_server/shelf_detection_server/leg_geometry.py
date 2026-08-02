@@ -57,9 +57,18 @@ def shelf_normal_yaw(
     right_x: float,
     right_y: float,
 ) -> float:
-    """Compute the shelf approach normal from the ordered leg cross-axis."""
+    """Compute the cross-axis normal that points toward the shelf midpoint."""
     cross_axis_yaw = math.atan2(right_y - left_y, right_x - left_x)
-    return normalize_angle(cross_axis_yaw - math.pi / 2.0)
+    normal_yaw = normalize_angle(cross_axis_yaw - math.pi / 2.0)
+    midpoint_x = (left_x + right_x) / 2.0
+    midpoint_y = (left_y + right_y) / 2.0
+    forward_dot = (
+        math.cos(normal_yaw) * midpoint_x
+        + math.sin(normal_yaw) * midpoint_y
+    )
+    if forward_dot < 0.0:
+        normal_yaw = normalize_angle(normal_yaw + math.pi)
+    return normal_yaw
 
 
 def _candidate_at(

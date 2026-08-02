@@ -68,6 +68,25 @@ def test_shelf_normal_is_distinct_from_midpoint_bearing():
     assert normal_yaw != pytest.approx(midpoint_bearing, abs=0.05)
 
 
+def test_shelf_normal_selects_the_branch_toward_midpoint():
+    normal_yaw = shelf_normal_yaw(1.231, 0.412, 1.174, -0.254)
+
+    assert normal_yaw == pytest.approx(-0.085, abs=0.01)
+    midpoint_x = (1.231 + 1.174) / 2.0
+    midpoint_y = (0.412 - 0.254) / 2.0
+    assert (
+        math.cos(normal_yaw) * midpoint_x
+        + math.sin(normal_yaw) * midpoint_y
+    ) > 0.0
+
+
+def test_shelf_normal_is_invariant_to_leg_endpoint_order():
+    forward = shelf_normal_yaw(1.231, 0.412, 1.174, -0.254)
+    reversed_order = shelf_normal_yaw(1.174, -0.254, 1.231, 0.412)
+
+    assert reversed_order == pytest.approx(forward)
+
+
 def test_below_threshold_scan_returns_no_measurement():
     scan = _scan_with_two_legs()
     scan.intensities = [0.0] * len(scan.intensities)
