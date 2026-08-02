@@ -48,6 +48,9 @@ class _Logger:
     def error(self, _message):
         pass
 
+    def warning(self, _message):
+        pass
+
 
 class _AlignmentHarness:
     def __init__(self, recovered_targets, retry_count=6):
@@ -67,6 +70,7 @@ class _AlignmentHarness:
         self.drives = []
         self.stop_count = 0
         self.elevator_count = 0
+        self.accepted_odom_yaw = 3.053559
 
     def get_parameter(self, name):
         return _Parameter(self.parameters[name])
@@ -93,6 +97,9 @@ class _AlignmentHarness:
 
     def _publish_elevator_up(self):
         self.elevator_count += 1
+
+    def _wait_for_odom_yaw(self, _deadline):
+        return self.accepted_odom_yaw
 
     def _align_at_safe_standoff(self, target, deadline):
         from shelf_detection_server.server import ShelfDetectionServer
@@ -131,6 +138,7 @@ def test_c9_policy_parameters_are_declared():
     assert declared["measured_drive_timeout_scale"] == 3.0
     assert declared["measured_rotation_timeout_scale"] == 3.0
     assert declared["measured_yaw_tolerance"] == 0.01
+    assert declared["entry_odom_yaw_tolerance"] == 0.03
 
 
 def test_attach_loop_contains_center_lock_and_recovery_paths():
@@ -146,7 +154,16 @@ def test_attach_loop_contains_center_lock_and_recovery_paths():
     assert "_recover_cart_frame_after_motion" in calls
     assert "_drive_forward_measured" in calls
     assert "_align_at_safe_standoff" in calls
+    assert "_accepted_odom_heading_ok" in calls
     assert "_publish_elevator_up" in calls
+
+    named_calls = {
+        node.func.id
+        for node in ast.walk(attach)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+    }
+    assert "shelf_heading_aligned" not in named_calls
 
 
 def test_recovery_is_bounded_by_retry_count():
@@ -244,7 +261,10 @@ def test_alignment_sequence_reobserves_until_staging_and_heading_pass():
         time.monotonic() + 10.0,
     )
 
-    assert result == ("base", 1.0, 0.0, 0.0)
+    assert result == (
+        ("base", 1.0, 0.0, 0.0),
+        harness.accepted_odom_yaw,
+    )
     assert harness.drives == pytest.approx(
         [math.hypot(staging_x, staging_y)]
     )
@@ -276,6 +296,19 @@ def test_alignment_exhaustion_stops_and_blocks_attach_elevator():
     assert harness.elevator_count == 0
 
 
+def test_alignment_rejects_missing_accepted_odom_yaw():
+    harness = _AlignmentHarness([])
+    harness.accepted_odom_yaw = None
+
+    result = harness._align_at_safe_standoff(
+        ("base", 1.0, 0.0, 0.0),
+        time.monotonic() + 10.0,
+    )
+
+    assert result is None
+    assert harness.stop_count == 1
+
+
 def test_heading_correction_uses_shelf_normal_and_is_capped():
     assert bounded_yaw_correction(-0.066, 1.0, 0.40) == pytest.approx(
         -0.066
@@ -284,6 +317,124 @@ def test_heading_correction_uses_shelf_normal_and_is_capped():
     assert bounded_yaw_correction(-1.0, 1.0, 0.40) == -0.40
     assert shelf_heading_aligned(0.03, 0.03)
     assert not shelf_heading_aligned(0.031, 0.03)
+
+
+class _EntryHarness:
+    def __init__(self, recovered_targets, current_yaw=3.053559):
+        self.parameters = {
+            "movement_timeout": 55.0,
+            "max_detected_yaw": 0.60,
+            "center_distance_tolerance": 0.20,
+            "center_lateral_tolerance": 0.08,
+            "center_lock_distance": 0.35,
+            "center_lock_min_steps": 2,
+            "center_drive_scale": 1.0,
+            "forward_step_distance": 0.20,
+            "final_drive_distance": 0.30,
+            "entry_odom_yaw_tolerance": 0.03,
+        }
+        self.accepted_yaw = 3.053559
+        self.current_yaw = current_yaw
+        self.recovered_targets = list(recovered_targets)
+        self.drives = []
+        self.stop_count = 0
+        self.elevator_count = 0
+
+    def get_parameter(self, name):
+        return _Parameter(self.parameters[name])
+
+    def get_logger(self):
+        return _Logger()
+
+    def _align_at_safe_standoff(self, target, _deadline):
+        return target, self.accepted_yaw
+
+    def _wait_for_odom_yaw(self, _deadline):
+        return self.current_yaw
+
+    def _accepted_odom_heading_ok(self, accepted_yaw, deadline):
+        from shelf_detection_server.server import ShelfDetectionServer
+
+        return ShelfDetectionServer._accepted_odom_heading_ok(
+            self, accepted_yaw, deadline
+        )
+
+    def _publish_cart_frame(self, *_args):
+        pass
+
+    def _current_scan_sequence(self):
+        return 1
+
+    def _drive_forward_measured(self, distance, _deadline):
+        self.drives.append(distance)
+        return True
+
+    def _recover_cart_frame_after_motion(self, _sequence, _deadline):
+        return self.recovered_targets.pop(0)
+
+    def _publish_stop(self):
+        self.stop_count += 1
+
+    def _publish_elevator_up(self):
+        self.elevator_count += 1
+
+    def attach(self, target):
+        from shelf_detection_server.server import ShelfDetectionServer
+
+        return ShelfDetectionServer._perform_stepwise_attach(self, target)
+
+
+def test_cloud_close_range_heading_jump_uses_constant_odom_guard(
+    monkeypatch,
+):
+    import shelf_detection_server.server as server_module
+
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+    harness = _EntryHarness(
+        [
+            ("base", 0.801, 0.055, 0.098),
+            ("base", 0.200, 0.050, 0.200),
+        ]
+    )
+
+    assert harness.attach(("base", 1.006, -0.024, 0.011))
+    assert harness.drives == pytest.approx([0.20, 0.20, 0.30])
+    assert harness.elevator_count == 1
+
+
+def test_constrained_entry_odom_drift_stops_before_drive_and_elevator(
+    monkeypatch,
+):
+    import shelf_detection_server.server as server_module
+
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+    harness = _EntryHarness([], current_yaw=3.093559)
+
+    assert not harness.attach(("base", 1.006, -0.024, 0.011))
+    assert harness.stop_count == 1
+    assert harness.drives == []
+    assert harness.elevator_count == 0
+
+
+def test_constrained_entry_stale_odom_stops_before_elevator(monkeypatch):
+    import shelf_detection_server.server as server_module
+
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+    harness = _EntryHarness([], current_yaw=None)
+
+    assert not harness.attach(("base", 1.006, -0.024, 0.011))
+    assert harness.stop_count == 1
+    assert harness.elevator_count == 0
+
+
+def test_constrained_entry_odom_guard_is_wrap_safe():
+    harness = _EntryHarness([], current_yaw=-3.13)
+    harness.accepted_yaw = 3.13
+
+    assert harness._accepted_odom_heading_ok(
+        harness.accepted_yaw, time.monotonic() + 1.0
+    )
+    assert harness.stop_count == 0
 
 
 def test_measured_drive_reads_odom_and_always_stops():
@@ -473,6 +624,11 @@ def test_final_measured_drive_precedes_elevator_publish():
         for node in method_calls
         if node.func.attr == "_drive_forward_measured"
     ]
+    guard_lines = [
+        node.lineno
+        for node in method_calls
+        if node.func.attr == "_accepted_odom_heading_ok"
+    ]
     elevator_line = next(
         node.lineno
         for node in method_calls
@@ -480,7 +636,9 @@ def test_final_measured_drive_precedes_elevator_publish():
     )
 
     assert measured_lines
+    assert guard_lines
     assert max(measured_lines) < elevator_line
+    assert max(guard_lines) < elevator_line
 
 
 def test_safe_standoff_alignment_reobserves_after_each_motion():
@@ -502,6 +660,7 @@ def test_safe_standoff_alignment_reobserves_after_each_motion():
     assert "_rotate_measured" in calls
     assert "_drive_forward_measured" in calls
     assert "_recover_cart_frame_after_motion" in calls
+    assert "_wait_for_odom_yaw" in calls
     assert "shelf_staging_error" in named_calls
     assert "bounded_yaw_correction" in named_calls
 

@@ -110,6 +110,7 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("measured_drive_timeout_scale", 3.0)
         self.declare_parameter("measured_rotation_timeout_scale", 3.0)
         self.declare_parameter("measured_yaw_tolerance", 0.01)
+        self.declare_parameter("entry_odom_yaw_tolerance", 0.03)
         self.declare_parameter("final_drive_distance", 0.30)
         self.declare_parameter("movement_timeout", 55.0)
         self.declare_parameter("elevator_publish_count", 5)
@@ -247,12 +248,13 @@ class ShelfDetectionServer(Node):
         deadline = time.monotonic() + float(
             self.get_parameter("movement_timeout").value
         )
-        target = self._align_at_safe_standoff(initial_target, deadline)
-        if target is None:
+        alignment = self._align_at_safe_standoff(initial_target, deadline)
+        if alignment is None:
             self.get_logger().error(
                 "attach stopped: safe-standoff shelf alignment failed"
             )
             return False
+        target, accepted_odom_yaw = alignment
         step = 0
         center_approach_complete = False
         while rclpy.ok() and time.monotonic() < deadline:
@@ -273,19 +275,15 @@ class ShelfDetectionServer(Node):
             center_y = float(
                 self.get_parameter("center_lateral_tolerance").value
             )
-            yaw_tolerance = float(self.get_parameter("yaw_tolerance").value)
             self.get_logger().info(
                 "stepwise attach sample: "
                 f"step={step} x={x:.3f} y={y:.3f} "
                 f"midpoint_bearing={yaw:.3f} "
                 f"shelf_normal_yaw={shelf_heading:.3f}"
             )
-            if not shelf_heading_aligned(shelf_heading, yaw_tolerance):
-                self.get_logger().error(
-                    "attach stopped: shelf heading drifted outside "
-                    f"tolerance; yaw={shelf_heading:.3f} "
-                    f"tolerance={yaw_tolerance:.3f}"
-                )
+            if not self._accepted_odom_heading_ok(
+                accepted_odom_yaw, deadline
+            ):
                 return False
             if abs(y) > center_y:
                 self.get_logger().error(
@@ -323,6 +321,10 @@ class ShelfDetectionServer(Node):
                     locked_distance, deadline
                 ):
                     return False
+                if not self._accepted_odom_heading_ok(
+                    accepted_odom_yaw, deadline
+                ):
+                    return False
                 center_approach_complete = True
                 break
 
@@ -338,6 +340,10 @@ class ShelfDetectionServer(Node):
                 )
                 return False
             if not self._drive_forward_measured(drive_distance, deadline):
+                return False
+            if not self._accepted_odom_heading_ok(
+                accepted_odom_yaw, deadline
+            ):
                 return False
 
             target = self._recover_cart_frame_after_motion(
@@ -371,6 +377,10 @@ class ShelfDetectionServer(Node):
                         )
                     ):
                         return False
+                    if not self._accepted_odom_heading_ok(
+                        accepted_odom_yaw, deadline
+                    ):
+                        return False
                     center_approach_complete = True
                     break
                 self.get_logger().error(
@@ -393,6 +403,10 @@ class ShelfDetectionServer(Node):
             self.get_parameter("final_drive_distance").value
         )
         if not self._drive_forward_measured(final_distance, deadline):
+            return False
+        if not self._accepted_odom_heading_ok(
+            accepted_odom_yaw, deadline
+        ):
             return False
         self._publish_stop()
         self._publish_elevator_up()
@@ -493,12 +507,21 @@ class ShelfDetectionServer(Node):
                 ):
                     return None
             else:
+                accepted_odom_yaw = self._wait_for_odom_yaw(deadline)
+                if accepted_odom_yaw is None:
+                    self._publish_stop()
+                    self.get_logger().error(
+                        "safe-standoff alignment rejected: accepted odom "
+                        "yaw unavailable"
+                    )
+                    return None
                 self.get_logger().info(
                     "safe-standoff alignment accepted: "
                     f"position_error={position_error:.3f} "
-                    f"shelf_normal_yaw={shelf_heading:.3f}"
+                    f"shelf_normal_yaw={shelf_heading:.3f} "
+                    f"accepted_odom_yaw={accepted_odom_yaw:.3f}"
                 )
-                return target
+                return target, accepted_odom_yaw
 
             target = self._recover_cart_frame_after_motion(
                 scan_before_motion, deadline
@@ -597,6 +620,38 @@ class ShelfDetectionServer(Node):
                 return yaw
             time.sleep(0.05)
         return None
+
+    def _accepted_odom_heading_ok(
+        self, accepted_yaw: float, deadline: float
+    ) -> bool:
+        current_yaw = self._wait_for_odom_yaw(deadline)
+        if current_yaw is None:
+            self._publish_stop()
+            self.get_logger().error(
+                "attach stopped: constrained-entry odom yaw unavailable"
+            )
+            return False
+
+        drift = normalize_angle(current_yaw - accepted_yaw)
+        tolerance = max(
+            0.0,
+            float(
+                self.get_parameter("entry_odom_yaw_tolerance").value
+            ),
+        )
+        self.get_logger().info(
+            "constrained-entry odom heading guard: "
+            f"accepted={accepted_yaw:.3f} current={current_yaw:.3f} "
+            f"drift={drift:.3f} tolerance={tolerance:.3f}"
+        )
+        if abs(drift) > tolerance:
+            self._publish_stop()
+            self.get_logger().error(
+                "attach stopped: odom heading drifted outside tolerance; "
+                f"drift={drift:.3f} tolerance={tolerance:.3f}"
+            )
+            return False
+        return True
 
     def _drive_forward_measured(
         self, distance: float, deadline: float

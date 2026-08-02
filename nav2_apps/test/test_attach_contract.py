@@ -39,6 +39,7 @@ def test_attach_service_owns_motion_and_elevator_sequence():
     server_calls = _called_methods(server_attach)
     assert "_align_at_safe_standoff" in server_calls
     assert "_drive_forward_measured" in server_calls
+    assert "_accepted_odom_heading_ok" in server_calls
     assert "_apply_pre_lock_yaw" not in server_calls
     assert "_publish_elevator_up" in server_calls
 
