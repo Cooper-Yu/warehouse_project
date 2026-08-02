@@ -14,7 +14,7 @@ setup(
     zip_safe=True,
     maintainer="Robot Developer Masterclass",
     maintainer_email="student@example.com",
-    description="Detection-only shelf service for Checkpoint 12.",
+    description="Detection and bounded stepwise shelf attach service for Checkpoint 12.",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [

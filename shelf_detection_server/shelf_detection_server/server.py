@@ -1,17 +1,26 @@
-"""Detection-only shelf service with no motion or elevator publishers."""
+"""Shelf detection and bounded C9-style stepwise attach service."""
 
 import math
+import threading
 import time
 from dataclasses import dataclass
 from typing import List, Optional
 
 import rclpy
-from geometry_msgs.msg import PointStamped, TransformStamped
+from geometry_msgs.msg import PointStamped, TransformStamped, Twist
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 from tf2_geometry_msgs import do_transform_point
-from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformListener
+from tf2_ros import (
+    Buffer,
+    TransformBroadcaster,
+    TransformException,
+    TransformListener,
+)
 from warehouse_interfaces.srv import GoToLoading
 
 
@@ -33,60 +42,113 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("min_leg_separation", 0.25)
         self.declare_parameter("detection_timeout", 3.0)
         self.declare_parameter("target_base_frame", "robot_base_footprint")
+        self.declare_parameter("forward_speed", 0.10)
+        self.declare_parameter("rotate_speed", 0.20)
+        self.declare_parameter("yaw_tolerance", 0.03)
+        self.declare_parameter("max_detected_yaw", 0.60)
+        self.declare_parameter("lateral_yaw_gain", 0.40)
+        self.declare_parameter("forward_step_distance", 0.20)
+        self.declare_parameter("center_distance_tolerance", 0.20)
+        self.declare_parameter("center_lateral_tolerance", 0.08)
+        self.declare_parameter("final_drive_distance", 0.30)
+        self.declare_parameter("movement_timeout", 45.0)
+        self.declare_parameter("elevator_publish_count", 5)
 
         self._latest_scan: Optional[LaserScan] = None
+        self._scan_sequence = 0
+        self._scan_lock = threading.Lock()
+        self._scan_group = MutuallyExclusiveCallbackGroup()
+        self._service_group = MutuallyExclusiveCallbackGroup()
         self._scan_sub = self.create_subscription(
             LaserScan,
             "/scan",
             self._scan_callback,
             qos_profile_sensor_data,
+            callback_group=self._scan_group,
+        )
+        self._cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        self._elevator_up_pub = self.create_publisher(
+            String, "/elevator_up", 10
         )
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._tf_broadcaster = TransformBroadcaster(self)
         self._active_cart_frame = None
         self._cart_frame_expiry = 0.0
-        self._cart_frame_timer = self.create_timer(0.1, self._republish_cart_frame)
+        self._cart_frame_timer = self.create_timer(
+            0.1, self._republish_cart_frame
+        )
         self._service = self.create_service(
-            GoToLoading, "/approach_shelf", self._handle_request
+            GoToLoading,
+            "/approach_shelf",
+            self._handle_request,
+            callback_group=self._service_group,
         )
         self.get_logger().info(
-            "detection-only /approach_shelf ready; no cmd_vel/elevator publishers"
+            "/approach_shelf ready: detection-only false, C9-style attach true"
         )
 
     def _scan_callback(self, scan: LaserScan) -> None:
-        self._latest_scan = scan
+        with self._scan_lock:
+            self._latest_scan = scan
+            self._scan_sequence += 1
 
     def _handle_request(
         self, request: GoToLoading.Request, response: GoToLoading.Response
     ) -> GoToLoading.Response:
-        if request.attach_to_shelf:
+        target = self._wait_for_cart_frame()
+        if target is None:
+            self._publish_stop()
             response.complete = False
             self.get_logger().error(
-                "Rejected attach_to_shelf=true in detection-only mode"
+                "complete=false: shelf detection timed out"
             )
             return response
 
+        self._publish_cart_frame(*target)
+        if not request.attach_to_shelf:
+            response.complete = True
+            self.get_logger().info(
+                "complete=true: detection-only cart_frame published"
+            )
+            return response
+
+        response.complete = self._perform_stepwise_attach(target)
+        if response.complete:
+            self.get_logger().info(
+                "complete=true: stepwise attach finished and elevator-up sent"
+            )
+        else:
+            self._publish_stop()
+            self.get_logger().error("complete=false: stepwise attach failed")
+        return response
+
+    def _wait_for_cart_frame(
+        self, after_sequence: Optional[int] = None
+    ) -> Optional[tuple]:
         deadline = time.monotonic() + float(
             self.get_parameter("detection_timeout").value
         )
         while rclpy.ok() and time.monotonic() < deadline:
+            if (
+                after_sequence is not None
+                and self._current_scan_sequence() <= after_sequence
+            ):
+                time.sleep(0.05)
+                continue
             target = self._detect_cart_frame()
             if target is not None:
-                self._publish_cart_frame(*target)
-                response.complete = True
-                self.get_logger().info(
-                    "complete=true: detection-only cart_frame published"
-                )
-                return response
+                return target
             time.sleep(0.05)
+        return None
 
-        response.complete = False
-        self.get_logger().error("complete=false: shelf detection timed out")
-        return response
+    def _current_scan_sequence(self) -> int:
+        with self._scan_lock:
+            return self._scan_sequence
 
     def _detect_cart_frame(self) -> Optional[tuple]:
-        scan = self._latest_scan
+        with self._scan_lock:
+            scan = self._latest_scan
         if scan is None or not scan.ranges or not scan.intensities:
             return None
 
@@ -158,16 +220,164 @@ class ShelfDetectionServer(Node):
         best = None
         best_score = math.inf
         for index, first in enumerate(candidates):
-            for second in candidates[index + 1 :]:
+            for second in candidates[index + 1:]:
                 separation = abs(first.y - second.y)
                 x_difference = abs(first.x - second.x)
-                if separation < min_separation or x_difference > max_x_difference:
+                if (
+                    separation < min_separation
+                    or x_difference > max_x_difference
+                ):
                     continue
                 score = abs((first.y + second.y) / 2.0) + x_difference
                 if score < best_score:
                     best = (first, second)
                     best_score = score
         return best
+
+    def _perform_stepwise_attach(self, initial_target: tuple) -> bool:
+        deadline = time.monotonic() + float(
+            self.get_parameter("movement_timeout").value
+        )
+        target = initial_target
+        step = 0
+        while rclpy.ok() and time.monotonic() < deadline:
+            frame_id, x, y = target
+            self._publish_cart_frame(frame_id, x, y)
+            yaw = math.atan2(y, x)
+            max_yaw = float(self.get_parameter("max_detected_yaw").value)
+            if abs(yaw) > max_yaw:
+                self.get_logger().error(
+                    "attach rejected: detected yaw "
+                    f"{yaw:.3f} exceeds {max_yaw:.3f}"
+                )
+                return False
+
+            center_x = float(
+                self.get_parameter("center_distance_tolerance").value
+            )
+            center_y = float(
+                self.get_parameter("center_lateral_tolerance").value
+            )
+            self.get_logger().info(
+                "stepwise attach sample: "
+                f"step={step} x={x:.3f} y={y:.3f} yaw={yaw:.3f}"
+            )
+            if x <= center_x and abs(y) <= center_y:
+                break
+
+            yaw_tolerance = float(self.get_parameter("yaw_tolerance").value)
+            if abs(yaw) >= yaw_tolerance:
+                scan_before_motion = self._current_scan_sequence()
+                correction = yaw * float(
+                    self.get_parameter("lateral_yaw_gain").value
+                )
+                if not self._rotate_open_loop(correction, deadline):
+                    return False
+                target = self._wait_for_cart_frame(scan_before_motion)
+                if target is None:
+                    self.get_logger().error(
+                        "attach stopped: cart_frame unavailable after "
+                        "bounded yaw correction"
+                    )
+                    return False
+                step += 1
+                continue
+
+            drive_distance = min(
+                float(self.get_parameter("forward_step_distance").value),
+                max(x - center_x, 0.0),
+            )
+            if drive_distance <= 0.0:
+                self.get_logger().error(
+                    "attach stopped: lateral error remained after "
+                    "center distance"
+                )
+                return False
+            scan_before_motion = self._current_scan_sequence()
+            if not self._drive_forward_open_loop(drive_distance, deadline):
+                return False
+
+            target = self._wait_for_cart_frame(scan_before_motion)
+            if target is None:
+                self.get_logger().error(
+                    "attach stopped: cart_frame unavailable after bounded step"
+                )
+                return False
+            step += 1
+
+        if time.monotonic() >= deadline:
+            self.get_logger().error("attach stopped: movement timeout")
+            return False
+
+        final_distance = float(
+            self.get_parameter("final_drive_distance").value
+        )
+        if not self._drive_forward_open_loop(final_distance, deadline):
+            return False
+        self._publish_stop()
+        self._publish_elevator_up()
+        return True
+
+    def _rotate_open_loop(self, yaw: float, deadline: float) -> bool:
+        speed = float(self.get_parameter("rotate_speed").value)
+        if speed <= 0.0 or time.monotonic() >= deadline:
+            return False
+        duration = abs(yaw) / speed
+        if time.monotonic() + duration > deadline:
+            return False
+        command = Twist()
+        command.angular.z = math.copysign(speed, yaw)
+        self.get_logger().info(
+            f"bounded yaw correction: yaw={yaw:.3f} duration={duration:.3f}"
+        )
+        try:
+            end = time.monotonic() + duration
+            while rclpy.ok() and time.monotonic() < end:
+                self._cmd_vel_pub.publish(command)
+                time.sleep(0.05)
+        finally:
+            self._publish_stop()
+        return True
+
+    def _drive_forward_open_loop(
+        self, distance: float, deadline: float
+    ) -> bool:
+        speed = float(self.get_parameter("forward_speed").value)
+        if distance <= 0.0 or speed <= 0.0 or time.monotonic() >= deadline:
+            return False
+        duration = distance / speed
+        if time.monotonic() + duration > deadline:
+            return False
+        command = Twist()
+        command.linear.x = speed
+        self.get_logger().info(
+            "bounded forward step: "
+            f"distance={distance:.3f} duration={duration:.3f}"
+        )
+        try:
+            end = time.monotonic() + duration
+            while rclpy.ok() and time.monotonic() < end:
+                self._cmd_vel_pub.publish(command)
+                time.sleep(0.05)
+        finally:
+            self._publish_stop()
+        return True
+
+    def _publish_stop(self) -> None:
+        self._cmd_vel_pub.publish(Twist())
+
+    def _publish_elevator_up(self) -> None:
+        message = String()
+        message.data = "up"
+        count = max(
+            1, int(self.get_parameter("elevator_publish_count").value)
+        )
+        for _ in range(count):
+            self._elevator_up_pub.publish(message)
+            time.sleep(0.1)
+        self.get_logger().warning(
+            f"published elevator-up {count} times after successful final push"
+        )
 
     def _transform_to_base(self, x: float, y: float, source_frame: str):
         target_frame = str(self.get_parameter("target_base_frame").value)
@@ -186,7 +396,9 @@ class ShelfDetectionServer(Node):
             transformed = do_transform_point(point, transform)
             return target_frame, transformed.point.x, transformed.point.y
         except TransformException as error:
-            self.get_logger().warning("cart_frame transform unavailable: %s" % error)
+            self.get_logger().warning(
+                "cart_frame transform unavailable: %s" % error
+            )
             return None
 
     def _publish_cart_frame(self, frame_id: str, x: float, y: float) -> None:
@@ -216,9 +428,12 @@ class ShelfDetectionServer(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = ShelfDetectionServer()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

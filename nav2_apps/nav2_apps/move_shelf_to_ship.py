@@ -1,4 +1,4 @@
-"""Checkpoint 12 bounded loading, approach, and elevator-up slices."""
+"""Checkpoint 12 loading and C9-style shelf-attach orchestration."""
 
 import argparse
 import math
@@ -7,10 +7,8 @@ import time
 from typing import List, Optional
 
 import rclpy
-from geometry_msgs.msg import Twist
 from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
-from std_msgs.msg import String
 
 from nav2_apps.pose_config import optional_initial_pose
 from nav2_apps.result_gate import ExitCode, classify_task_result
@@ -59,14 +57,11 @@ def _parser() -> argparse.ArgumentParser:
         "--approach-and-elevator",
         action="store_true",
         help=(
-            "After detection, run one bounded forward approach, stop, publish "
-            "/elevator_up once, and wait for external lift acceptance."
+            "After loading, request the bounded C9-style shelf attach service "
+            "and wait for external lift acceptance."
         ),
     )
-    parser.add_argument("--approach-distance", type=float, default=0.30)
-    parser.add_argument("--approach-speed", type=float, default=0.05)
-    parser.add_argument("--approach-timeout", type=float, default=10.0)
-    parser.add_argument("--elevator-topic", default="/elevator_up")
+    parser.add_argument("--attach-timeout", type=float, default=60.0)
     parser.add_argument("--elevator-wait", type=float, default=8.0)
     return parser
 
@@ -167,70 +162,64 @@ def _wait_for_detection(
     return False
 
 
-def _publish_stop(publisher) -> None:
-    publisher.publish(Twist())
-
-
-def _bounded_forward_approach(
+def _request_stepwise_attach(
     navigator: BasicNavigator,
-    distance: float,
-    speed: float,
+    service_name: str,
     timeout: float,
 ) -> bool:
-    """Drive a fixed bounded distance, then stop; no Nav2 goal is used here."""
-    if distance <= 0.0 or speed <= 0.0 or timeout <= 0.0:
-        navigator.get_logger().error(
-            "Approach parameters must be positive: "
-            f"distance={distance:.3f} speed={speed:.3f} timeout={timeout:.3f}"
-        )
+    """Request the capability owning bounded motion and the lift command."""
+    if timeout <= 0.0:
+        navigator.get_logger().error("attach timeout must be positive")
         return False
 
-    publisher = navigator.create_publisher(Twist, "/cmd_vel", 10)
-    start = time.monotonic()
-    duration = distance / speed
-    if duration > timeout:
-        navigator.get_logger().error(
-            f"Approach duration {duration:.3f}s exceeds timeout {timeout:.3f}s"
-        )
-        _publish_stop(publisher)
-        return False
+    service_type = _load_shelf_service_type()
+    client = navigator.create_client(service_type, service_name)
+    deadline = time.monotonic() + timeout
+    while rclpy.ok() and not client.wait_for_service(timeout_sec=0.2):
+        if time.monotonic() >= deadline:
+            navigator.get_logger().error(
+                "Shelf attach service was unavailable"
+            )
+            return False
 
-    command = Twist()
-    command.linear.x = speed
-    try:
-        while rclpy.ok() and time.monotonic() - start < duration:
-            publisher.publish(command)
-            rclpy.spin_once(navigator, timeout_sec=0.05)
-    finally:
-        _publish_stop(publisher)
+    request = service_type.Request()
+    request.attach_to_shelf = True
+    future = client.call_async(request)
+    while rclpy.ok() and not future.done():
+        if time.monotonic() >= deadline:
+            navigator.get_logger().error("Shelf attach service timed out")
+            return False
+        rclpy.spin_once(navigator, timeout_sec=0.1)
+
+    if (
+        not future.done()
+        or not future.result()
+        or not future.result().complete
+    ):
+        navigator.get_logger().error(
+            "Shelf attach did not complete successfully"
+        )
+        return False
     navigator.get_logger().info(
-        "bounded under-shelf approach complete: "
-        f"distance={distance:.3f} speed={speed:.3f}"
+        "stepwise attach service passed: motion stopped and elevator-up sent"
     )
     return True
 
 
-def _publish_elevator_up_and_wait(
+def _wait_for_external_lift_acceptance(
     navigator: BasicNavigator,
-    topic: str,
     wait_seconds: float,
 ) -> bool:
-    """Issue one elevator-up command and wait for external acceptance only."""
+    """Wait without claiming that the mechanical lift completed."""
     if wait_seconds <= 0.0:
         navigator.get_logger().error("elevator wait must be positive")
         return False
-    publisher = navigator.create_publisher(String, topic, 10)
-    command = String()
-    command.data = "up"
-    publisher.publish(command)
-    navigator.get_logger().warning(
-        "published one elevator-up command; no programmatic completion feedback is available"
-    )
     deadline = time.monotonic() + wait_seconds
     while rclpy.ok() and time.monotonic() < deadline:
         rclpy.spin_once(navigator, timeout_sec=0.1)
     navigator.get_logger().warning(
-        "elevator-up bounded wait ended; external visual/state acceptance is required before footprint change"
+        "elevator-up bounded wait ended; external visual/state acceptance "
+        "is required before footprint change"
     )
     return False
 
@@ -286,31 +275,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         navigator.get_logger().info("loading_position goal succeeded")
         if not args.detection_only and not args.approach_and_elevator:
             return int(exit_code)
-        detection_ok = _wait_for_detection(
-            navigator,
-            args.shelf_service,
-            args.cart_frame,
-            args.base_frame,
-            args.detection_timeout,
-        )
-        if not detection_ok:
-            return int(ExitCode.UNKNOWN)
-        if not args.approach_and_elevator:
-            return int(ExitCode.SUCCEEDED)
-        if not _bounded_forward_approach(
-            navigator,
-            args.approach_distance,
-            args.approach_speed,
-            args.approach_timeout,
+        if args.detection_only:
+            detection_ok = _wait_for_detection(
+                navigator,
+                args.shelf_service,
+                args.cart_frame,
+                args.base_frame,
+                args.detection_timeout,
+            )
+            return int(
+                ExitCode.SUCCEEDED if detection_ok else ExitCode.UNKNOWN
+            )
+        if not _request_stepwise_attach(
+            navigator, args.shelf_service, args.attach_timeout
         ):
             return int(ExitCode.UNKNOWN)
-        if not _publish_elevator_up_and_wait(
-            navigator,
-            args.elevator_topic,
-            args.elevator_wait,
+        if not _wait_for_external_lift_acceptance(
+            navigator, args.elevator_wait
         ):
             navigator.get_logger().warning(
-                "Slice 2B stopped at lift_acceptance_pending; external acceptance is required"
+                "Slice 2B stopped at lift_acceptance_pending; external "
+                "acceptance is required"
             )
             return int(ExitCode.UNKNOWN)
         return int(ExitCode.UNKNOWN)
