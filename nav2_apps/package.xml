@@ -10,6 +10,8 @@
   <buildtool_depend>ament_python</buildtool_depend>
 
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>warehouse_interfaces</exec_depend>

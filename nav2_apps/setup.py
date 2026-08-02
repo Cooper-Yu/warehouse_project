@@ -19,7 +19,14 @@ setup(
     description="Checkpoint 12 Nav2 mission applications.",
     license="Apache-2.0",
     scripts=[
+        "scripts/collect_motion_evidence",
         "scripts/collect_slice1_evidence",
         "scripts/move_shelf_to_ship.py",
     ],
+    entry_points={
+        "console_scripts": [
+            "motion_evidence_monitor = "
+            "nav2_apps.motion_evidence_monitor:main",
+        ],
+    },
 )

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ $# -eq 0 ]]; then
+  echo "Usage: collect_motion_evidence <mission command> [args...]" >&2
+  exit 2
+fi
+
+find_repo_root() {
+  if git rev-parse --show-toplevel >/dev/null 2>&1; then
+    git rev-parse --show-toplevel
+    return
+  fi
+  package_prefix="$(ros2 pkg prefix nav2_apps 2>/dev/null || true)"
+  workspace_root="${package_prefix%/install/nav2_apps}"
+  source_candidate="${workspace_root}/src/warehouse_project"
+  if git -C "${source_candidate}" rev-parse --show-toplevel >/dev/null 2>&1; then
+    git -C "${source_candidate}" rev-parse --show-toplevel
+    return
+  fi
+  echo "Cannot locate warehouse_project Git repository." >&2
+  return 1
+}
+
+repo_root="$(find_repo_root)"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+output_dir="${repo_root}/nav2_apps/runtime_logs/motion_${timestamp}"
+mkdir -p "${output_dir}"
+
+{
+  echo "timestamp_utc: ${timestamp}"
+  echo "environment: ${ROS_DISTRO:-unknown}"
+  echo "commit_sha: $(git -C "${repo_root}" rev-parse HEAD)"
+  echo "command: |"
+  printf "  %q " "$@"
+  echo
+  echo "working_tree_status: |"
+  git -C "${repo_root}" status --short | sed 's/^/  /'
+} > "${output_dir}/metadata.yaml"
+
+monitor_executable="$(ros2 pkg prefix nav2_apps)/lib/nav2_apps/motion_evidence_monitor"
+"${monitor_executable}" --ros-args \
+  -p output_dir:="${output_dir}" \
+  > "${output_dir}/monitor.log" 2>&1 &
+monitor_pid=$!
+monitor_stopped=0
+
+stop_monitor() {
+  if [[ ${monitor_stopped} -eq 1 ]]; then
+    return
+  fi
+  monitor_stopped=1
+  if kill -0 "${monitor_pid}" 2>/dev/null; then
+    kill -INT "${monitor_pid}" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      if ! kill -0 "${monitor_pid}" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+    if kill -0 "${monitor_pid}" 2>/dev/null; then
+      kill -TERM "${monitor_pid}" 2>/dev/null || true
+    fi
+    wait "${monitor_pid}" 2>/dev/null || true
+  fi
+}
+trap stop_monitor EXIT INT TERM
+
+for _ in $(seq 1 50); do
+  if grep -q "motion evidence monitor ready" "${output_dir}/monitor.log"; then
+    break
+  fi
+  if ! kill -0 "${monitor_pid}" 2>/dev/null; then
+    echo "Motion monitor exited before becoming ready." >&2
+    cat "${output_dir}/monitor.log" >&2
+    exit 3
+  fi
+  sleep 0.1
+done
+
+if ! grep -q "motion evidence monitor ready" "${output_dir}/monitor.log"; then
+  echo "Motion monitor readiness timed out." >&2
+  exit 4
+fi
+
+set +e
+"$@" 2>&1 | tee "${output_dir}/mission.log"
+mission_status=${PIPESTATUS[0]}
+set -e
+
+stop_monitor
+trap - EXIT INT TERM
+echo "command_exit_code: ${mission_status}" >> "${output_dir}/metadata.yaml"
+echo "Bounded motion evidence: ${output_dir}"
+exit "${mission_status}"
