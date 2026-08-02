@@ -14,6 +14,12 @@ from nav2_apps.pose_config import SIM_LOADING_POSE, optional_initial_pose
 from nav2_apps.result_gate import ExitCode, classify_task_result
 
 
+SIM_LOADED_FOOTPRINT = (
+    "[[0.40, 0.45], [-0.40, 0.45], "
+    "[-0.40, -0.45], [0.40, -0.45]]"
+)
+
+
 def _load_shelf_service_type():
     """Load the shared service only when detection mode is selected."""
     try:
@@ -65,6 +71,29 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--attach-timeout", type=float, default=60.0)
     parser.add_argument("--elevator-wait", type=float, default=8.0)
+    parser.add_argument(
+        "--loaded-footprint-only",
+        action="store_true",
+        help=(
+            "Apply and verify both loaded costmap footprints, then stop."
+        ),
+    )
+    parser.add_argument(
+        "--confirm-lift-accepted",
+        action="store_true",
+        help="Confirm external shelf-lift acceptance for footprint-only mode.",
+    )
+    parser.add_argument(
+        "--confirm-robot-stopped",
+        action="store_true",
+        help="Confirm that no robot motion or Nav2 goal is active.",
+    )
+    parser.add_argument(
+        "--loaded-footprint",
+        default=SIM_LOADED_FOOTPRINT,
+    )
+    parser.add_argument("--footprint-timeout", type=float, default=10.0)
+    parser.add_argument("--footprint-edge-tolerance", type=float, default=0.03)
     return parser
 
 
@@ -237,6 +266,44 @@ def main(argv: Optional[List[str]] = None) -> int:
     rclpy.init(args=ros_args)
     navigator = BasicNavigator()
     try:
+        if args.loaded_footprint_only:
+            if not (
+                args.confirm_lift_accepted and args.confirm_robot_stopped
+            ):
+                navigator.get_logger().error(
+                    "loaded-footprint-only requires explicit lift and "
+                    "stopped-state confirmations"
+                )
+                return int(ExitCode.UNKNOWN)
+            try:
+                from nav2_apps.footprint_transaction import (
+                    apply_loaded_footprint,
+                )
+
+                transaction = apply_loaded_footprint(
+                    navigator,
+                    args.loaded_footprint,
+                    args.footprint_timeout,
+                    args.footprint_edge_tolerance,
+                )
+            except (RuntimeError, TypeError, ValueError) as error:
+                navigator.get_logger().error(
+                    f"loaded footprint transaction error: {error}"
+                )
+                return int(ExitCode.UNKNOWN)
+            if not transaction.success:
+                navigator.get_logger().error(
+                    "loaded footprint transaction failed: "
+                    f"{transaction.reason}; "
+                    f"rollback_verified={transaction.rollback_verified}"
+                )
+                return int(ExitCode.UNKNOWN)
+            navigator.get_logger().info(
+                "loaded_footprint_verified on global and local costmaps; "
+                "Slice stopped before shipping navigation"
+            )
+            return int(ExitCode.SUCCEEDED)
+
         if initial_pose is not None:
             navigator.setInitialPose(
                 _pose(navigator, args.frame_id, *initial_pose)
