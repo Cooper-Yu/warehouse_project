@@ -144,7 +144,9 @@ class ShelfDetectionServer(Node):
         # Simulation shelf is approximately square: 0.7406 m / 2.
         # Real and non-square shelves must override this calibrated value.
         self.declare_parameter("final_drive_distance", 0.3703)
-        self.declare_parameter("movement_timeout", 55.0)
+        # Keep the full maneuver bounded while allowing one slower short
+        # staging correction before constrained shelf entry.
+        self.declare_parameter("movement_timeout", 75.0)
         self.declare_parameter("elevator_publish_count", 5)
 
         self._latest_scan: Optional[LaserScan] = None

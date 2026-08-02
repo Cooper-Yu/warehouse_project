@@ -81,7 +81,7 @@ class _AlignmentHarness:
             "alignment_settle_sample_count": 3,
             "alignment_settle_yaw_tolerance": 0.01,
             "alignment_required_consecutive_samples": 2,
-            "movement_timeout": 55.0,
+            "movement_timeout": 75.0,
         }
         self.recovered_targets = list(recovered_targets)
         self.rotations = []
@@ -165,7 +165,7 @@ def test_c9_policy_parameters_are_declared():
     assert declared["alignment_max_travel_yaw"] == 1.20
     assert declared["alignment_short_drive_distance"] == 0.20
     assert declared["alignment_short_forward_speed"] == 0.05
-    assert declared["movement_timeout"] == 55.0
+    assert declared["movement_timeout"] == 75.0
     assert declared["center_lock_distance"] == 0.35
     assert declared["center_lock_min_steps"] == 2
     assert declared["center_drive_scale"] == 1.0
