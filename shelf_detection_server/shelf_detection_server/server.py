@@ -50,6 +50,26 @@ def bounded_yaw_correction(
     return max(-limit, min(yaw * gain, limit))
 
 
+def alignment_yaw_command(
+    yaw: float,
+    coarse_gain: float,
+    max_abs_correction: float,
+    coarse_speed: float,
+    fine_threshold: float,
+    fine_gain: float,
+    fine_speed: float,
+) -> tuple:
+    """Return damped correction, positive speed, and regime name."""
+    fine = abs(yaw) <= max(fine_threshold, 0.0)
+    gain = fine_gain if fine else coarse_gain
+    speed = fine_speed if fine else coarse_speed
+    return (
+        bounded_yaw_correction(yaw, gain, max_abs_correction),
+        speed,
+        "fine" if fine else "coarse",
+    )
+
+
 def shelf_heading_aligned(yaw: float, tolerance: float) -> bool:
     return abs(yaw) <= max(tolerance, 0.0)
 
@@ -94,6 +114,9 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("max_detected_yaw", 0.60)
         self.declare_parameter("alignment_heading_gain", 1.0)
         self.declare_parameter("alignment_max_yaw_correction", 0.40)
+        self.declare_parameter("alignment_fine_yaw_threshold", 0.20)
+        self.declare_parameter("alignment_fine_heading_gain", 0.50)
+        self.declare_parameter("alignment_fine_rotate_speed", 0.05)
         self.declare_parameter("alignment_standoff_distance", 1.00)
         self.declare_parameter("alignment_position_tolerance", 0.08)
         self.declare_parameter("alignment_retry_count", 6)
@@ -510,7 +533,11 @@ class ShelfDetectionServer(Node):
                 shelf_heading, yaw_tolerance
             ):
                 aligned_samples = 0
-                correction = bounded_yaw_correction(
+                (
+                    correction,
+                    correction_speed,
+                    correction_regime,
+                ) = alignment_yaw_command(
                     shelf_heading,
                     float(
                         self.get_parameter("alignment_heading_gain").value
@@ -520,9 +547,32 @@ class ShelfDetectionServer(Node):
                             "alignment_max_yaw_correction"
                         ).value
                     ),
+                    float(self.get_parameter("rotate_speed").value),
+                    float(
+                        self.get_parameter(
+                            "alignment_fine_yaw_threshold"
+                        ).value
+                    ),
+                    float(
+                        self.get_parameter(
+                            "alignment_fine_heading_gain"
+                        ).value
+                    ),
+                    float(
+                        self.get_parameter(
+                            "alignment_fine_rotate_speed"
+                        ).value
+                    ),
+                )
+                self.get_logger().info(
+                    "safe-standoff yaw correction selected: "
+                    f"regime={correction_regime} "
+                    f"observed={shelf_heading:.3f} "
+                    f"target={correction:.3f} "
+                    f"speed={correction_speed:.3f}"
                 )
                 if abs(correction) <= 0.0 or not self._rotate_measured(
-                    correction, deadline
+                    correction, deadline, correction_speed
                 ):
                     return None
                 if self._wait_for_stable_odom_yaw(deadline) is None:
@@ -829,8 +879,17 @@ class ShelfDetectionServer(Node):
         )
         return False
 
-    def _rotate_measured(self, yaw: float, deadline: float) -> bool:
-        speed = float(self.get_parameter("rotate_speed").value)
+    def _rotate_measured(
+        self,
+        yaw: float,
+        deadline: float,
+        speed_override: Optional[float] = None,
+    ) -> bool:
+        speed = (
+            float(self.get_parameter("rotate_speed").value)
+            if speed_override is None
+            else float(speed_override)
+        )
         target = abs(yaw)
         tolerance = max(
             0.0,

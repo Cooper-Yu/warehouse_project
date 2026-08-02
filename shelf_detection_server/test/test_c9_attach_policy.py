@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from shelf_detection_server.server import (  # noqa: E402
+    alignment_yaw_command,
     bounded_yaw_correction,
     c9_center_lock_enabled,
     c9_locked_drive_distance,
@@ -55,6 +56,7 @@ class _Logger:
 class _AlignmentHarness:
     def __init__(self, recovered_targets, retry_count=6):
         self.parameters = {
+            "rotate_speed": 0.20,
             "alignment_retry_count": retry_count,
             "alignment_standoff_distance": 1.0,
             "alignment_position_tolerance": 0.08,
@@ -63,6 +65,9 @@ class _AlignmentHarness:
             "max_detected_yaw": 0.60,
             "alignment_heading_gain": 1.0,
             "alignment_max_yaw_correction": 0.40,
+            "alignment_fine_yaw_threshold": 0.20,
+            "alignment_fine_heading_gain": 0.50,
+            "alignment_fine_rotate_speed": 0.05,
             "alignment_settle_timeout": 2.0,
             "alignment_settle_sample_count": 3,
             "alignment_settle_yaw_tolerance": 0.01,
@@ -86,7 +91,7 @@ class _AlignmentHarness:
     def _current_scan_sequence(self):
         return 1
 
-    def _rotate_measured(self, yaw, _deadline):
+    def _rotate_measured(self, yaw, _deadline, _speed_override=None):
         self.rotations.append(yaw)
         return True
 
@@ -133,6 +138,9 @@ def test_c9_policy_parameters_are_declared():
 
     assert declared["alignment_heading_gain"] == 1.0
     assert declared["alignment_max_yaw_correction"] == 0.40
+    assert declared["alignment_fine_yaw_threshold"] == 0.20
+    assert declared["alignment_fine_heading_gain"] == 0.50
+    assert declared["alignment_fine_rotate_speed"] == 0.05
     assert declared["alignment_standoff_distance"] == 1.00
     assert declared["alignment_position_tolerance"] == 0.08
     assert declared["alignment_retry_count"] == 6
@@ -283,7 +291,7 @@ def test_alignment_sequence_reobserves_until_staging_and_heading_pass():
         [math.hypot(staging_x, staging_y)]
     )
     assert harness.rotations == pytest.approx(
-        [travel_yaw, -0.40, heading_after_first_correction]
+        [travel_yaw, -0.40, heading_after_first_correction * 0.50]
     )
     assert harness.settle_count == 5
 
@@ -416,6 +424,36 @@ def test_heading_correction_uses_shelf_normal_and_is_capped():
     assert bounded_yaw_correction(-1.0, 1.0, 0.40) == -0.40
     assert shelf_heading_aligned(0.03, 0.03)
     assert not shelf_heading_aligned(0.031, 0.03)
+
+
+@pytest.mark.parametrize(
+    "yaw,expected_correction,expected_speed,expected_regime",
+    [
+        (0.043, 0.0215, 0.05, "fine"),
+        (-0.170, -0.085, 0.05, "fine"),
+        (0.151, 0.0755, 0.05, "fine"),
+        (-0.460, -0.40, 0.20, "coarse"),
+    ],
+)
+def test_alignment_yaw_command_damps_cloud_oscillation_samples(
+    yaw,
+    expected_correction,
+    expected_speed,
+    expected_regime,
+):
+    correction, speed, regime = alignment_yaw_command(
+        yaw=yaw,
+        coarse_gain=1.0,
+        max_abs_correction=0.40,
+        coarse_speed=0.20,
+        fine_threshold=0.20,
+        fine_gain=0.50,
+        fine_speed=0.05,
+    )
+
+    assert correction == pytest.approx(expected_correction)
+    assert speed == pytest.approx(expected_speed)
+    assert regime == expected_regime
 
 
 class _EntryHarness:
@@ -625,10 +663,12 @@ class _RotationHarness:
     def _publish_stop(self):
         self.stop_count += 1
 
-    def rotate(self, yaw, deadline):
+    def rotate(self, yaw, deadline, speed_override=None):
         from shelf_detection_server.server import ShelfDetectionServer
 
-        return ShelfDetectionServer._rotate_measured(self, yaw, deadline)
+        return ShelfDetectionServer._rotate_measured(
+            self, yaw, deadline, speed_override
+        )
 
 
 @pytest.mark.parametrize(
@@ -669,6 +709,23 @@ def test_measured_yaw_stale_odom_stops_and_fails(monkeypatch):
 
     assert not harness.rotate(0.20, deadline=10.0)
     assert harness.stop_count == 1
+
+
+def test_measured_yaw_uses_fine_speed_override(monkeypatch):
+    import shelf_detection_server.server as server_module
+
+    clock = _Clock()
+    harness = _RotationHarness(0.0, [0.01, 0.02, 0.03, 0.04, 0.05])
+    monkeypatch.setattr(server_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(server_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+
+    assert harness.rotate(0.05, deadline=10.0, speed_override=0.05)
+    assert harness.publisher.messages
+    assert all(
+        message.angular.z == pytest.approx(0.05)
+        for message in harness.publisher.messages
+    )
 
 
 def test_measured_yaw_unavailable_initial_odom_stops(monkeypatch):
@@ -761,7 +818,7 @@ def test_safe_standoff_alignment_reobserves_after_each_motion():
     assert "_recover_cart_frame_after_motion" in calls
     assert "_wait_for_stable_odom_yaw" in calls
     assert "shelf_staging_error" in named_calls
-    assert "bounded_yaw_correction" in named_calls
+    assert "alignment_yaw_command" in named_calls
 
 
 def test_attach_calls_alignment_before_any_entry_drive():
