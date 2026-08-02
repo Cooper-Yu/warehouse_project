@@ -153,9 +153,7 @@ def _wait_for_detection(
                 )
                 navigator.get_logger().info(
                     "detection-only passed: complete=true and "
-                    "%s -> %s is available",
-                    base_frame,
-                    cart_frame,
+                    f"{base_frame} -> {cart_frame} is available"
                 )
                 return True
             except tf2_ros.TransformException:
@@ -163,9 +161,8 @@ def _wait_for_detection(
     finally:
         del listener
     navigator.get_logger().error(
-        "Shelf detection completed but %s -> %s TF was unavailable",
-        base_frame,
-        cart_frame,
+        "Shelf detection completed but "
+        f"{base_frame} -> {cart_frame} TF was unavailable"
     )
     return False
 
@@ -183,10 +180,8 @@ def _bounded_forward_approach(
     """Drive a fixed bounded distance, then stop; no Nav2 goal is used here."""
     if distance <= 0.0 or speed <= 0.0 or timeout <= 0.0:
         navigator.get_logger().error(
-            "Approach parameters must be positive: distance=%.3f speed=%.3f timeout=%.3f",
-            distance,
-            speed,
-            timeout,
+            "Approach parameters must be positive: "
+            f"distance={distance:.3f} speed={speed:.3f} timeout={timeout:.3f}"
         )
         return False
 
@@ -195,7 +190,7 @@ def _bounded_forward_approach(
     duration = distance / speed
     if duration > timeout:
         navigator.get_logger().error(
-            "Approach duration %.3fs exceeds timeout %.3fs", duration, timeout
+            f"Approach duration {duration:.3f}s exceeds timeout {timeout:.3f}s"
         )
         _publish_stop(publisher)
         return False
@@ -209,9 +204,8 @@ def _bounded_forward_approach(
     finally:
         _publish_stop(publisher)
     navigator.get_logger().info(
-        "bounded under-shelf approach complete: distance=%.3f speed=%.3f",
-        distance,
-        speed,
+        "bounded under-shelf approach complete: "
+        f"distance={distance:.3f} speed={speed:.3f}"
     )
     return True
 
