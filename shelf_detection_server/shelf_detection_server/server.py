@@ -3,8 +3,7 @@
 import math
 import threading
 import time
-from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 import rclpy
 from geometry_msgs.msg import PointStamped, TransformStamped, Twist
@@ -23,14 +22,7 @@ from tf2_ros import (
 )
 from warehouse_interfaces.srv import GoToLoading
 
-
-@dataclass
-class LegCandidate:
-    x: float
-    y: float
-    low_index: int
-    high_index: int
-    size: int
+from shelf_detection_server.leg_geometry import detect_leg_pair
 
 
 def c9_yaw_correction_enabled(
@@ -196,87 +188,28 @@ class ShelfDetectionServer(Node):
         if scan is None or not scan.ranges or not scan.intensities:
             return None
 
-        threshold = float(self.get_parameter("intensity_threshold").value)
-        min_size = int(self.get_parameter("min_cluster_size").value)
-        count = min(len(scan.ranges), len(scan.intensities))
-        clusters: List[List[int]] = []
-        current: List[int] = []
-        for index in range(count):
-            intensity = scan.intensities[index]
-            distance = scan.ranges[index]
-            valid = (
-                math.isfinite(intensity)
-                and intensity >= threshold
-                and math.isfinite(distance)
-                and scan.range_min <= distance <= scan.range_max
-            )
-            if valid:
-                current.append(index)
-            else:
-                if len(current) >= min_size:
-                    clusters.append(current)
-                current = []
-        if len(current) >= min_size:
-            clusters.append(current)
-
-        candidates = []
-        for cluster in clusters:
-            candidate = self._candidate(scan, cluster)
-            if candidate.x > 0.0:
-                candidates.append(candidate)
-
-        pair = self._best_pair(candidates)
-        if pair is None:
-            return None
-        left, right = pair
-        left_index = left.high_index if left.y < right.y else left.low_index
-        right_index = right.low_index if left.y < right.y else right.high_index
-        left = self._candidate_at(scan, left_index, left)
-        right = self._candidate_at(scan, right_index, right)
-        laser_x = (left.x + right.x) / 2.0
-        laser_y = (left.y + right.y) / 2.0
-        return self._transform_to_base(laser_x, laser_y, scan.header.frame_id)
-
-    def _candidate(self, scan: LaserScan, cluster: List[int]) -> LegCandidate:
-        return self._candidate_at(
+        measurement = detect_leg_pair(
             scan,
-            cluster[len(cluster) // 2],
-            LegCandidate(0.0, 0.0, cluster[0], cluster[-1], len(cluster)),
+            intensity_threshold=float(
+                self.get_parameter("intensity_threshold").value
+            ),
+            min_cluster_size=int(
+                self.get_parameter("min_cluster_size").value
+            ),
+            max_x_difference=float(
+                self.get_parameter("max_x_difference").value
+            ),
+            min_leg_separation=float(
+                self.get_parameter("min_leg_separation").value
+            ),
         )
-
-    @staticmethod
-    def _candidate_at(
-        scan: LaserScan, index: int, source: LegCandidate
-    ) -> LegCandidate:
-        angle = scan.angle_min + index * scan.angle_increment
-        distance = scan.ranges[index]
-        return LegCandidate(
-            distance * math.cos(angle),
-            distance * math.sin(angle),
-            source.low_index,
-            source.high_index,
-            source.size,
+        if measurement is None:
+            return None
+        return self._transform_to_base(
+            measurement.midpoint_x,
+            measurement.midpoint_y,
+            measurement.frame_id,
         )
-
-    def _best_pair(self, candidates: List[LegCandidate]):
-        min_separation = float(self.get_parameter("min_leg_separation").value)
-        max_x_difference = float(self.get_parameter("max_x_difference").value)
-        best = None
-        best_score = math.inf
-        for index, first in enumerate(candidates):
-            for second in candidates[index + 1:]:
-                separation = abs(first.y - second.y)
-                x_difference = abs(first.x - second.x)
-                if (
-                    separation < min_separation
-                    or x_difference > max_x_difference
-                ):
-                    continue
-                score = abs((first.y + second.y) / 2.0) + x_difference
-                if score < best_score:
-                    best = (first, second)
-                    best_score = score
-        return best
 
     def _perform_stepwise_attach(self, initial_target: tuple) -> bool:
         deadline = time.monotonic() + float(

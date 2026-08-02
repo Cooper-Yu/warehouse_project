@@ -19,6 +19,7 @@ setup(
     entry_points={
         "console_scripts": [
             "shelf_detection_server = shelf_detection_server.server:main",
+            "shelf_geometry_observer = shelf_detection_server.geometry_observer:main",
         ],
     },
 )
