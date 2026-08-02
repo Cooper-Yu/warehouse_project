@@ -138,7 +138,9 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("alignment_settle_yaw_tolerance", 0.01)
         self.declare_parameter("alignment_required_consecutive_samples", 2)
         self.declare_parameter("entry_odom_yaw_tolerance", 0.03)
-        self.declare_parameter("final_drive_distance", 0.30)
+        # Simulation shelf is approximately square: 0.7406 m / 2.
+        # Real and non-square shelves must override this calibrated value.
+        self.declare_parameter("final_drive_distance", 0.3703)
         self.declare_parameter("movement_timeout", 55.0)
         self.declare_parameter("elevator_publish_count", 5)
 

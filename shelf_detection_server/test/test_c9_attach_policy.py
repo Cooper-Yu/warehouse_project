@@ -169,6 +169,7 @@ def test_c9_policy_parameters_are_declared():
     assert declared["alignment_settle_sample_count"] == 3
     assert declared["alignment_settle_yaw_tolerance"] == 0.01
     assert declared["alignment_required_consecutive_samples"] == 2
+    assert declared["final_drive_distance"] == pytest.approx(0.3703)
     assert declared["entry_odom_yaw_tolerance"] == 0.03
 
 
@@ -562,7 +563,7 @@ class _EntryHarness:
             "center_lock_min_steps": 2,
             "center_drive_scale": 1.0,
             "forward_step_distance": 0.20,
-            "final_drive_distance": 0.30,
+            "final_drive_distance": 0.3703,
             "entry_odom_yaw_tolerance": 0.03,
         }
         self.accepted_yaw = 3.053559
@@ -630,7 +631,7 @@ def test_cloud_close_range_heading_jump_uses_constant_odom_guard(
     )
 
     assert harness.attach(("base", 1.006, -0.024, 0.011))
-    assert harness.drives == pytest.approx([0.20, 0.20, 0.30])
+    assert harness.drives == pytest.approx([0.20, 0.20, 0.3703])
     assert harness.elevator_count == 1
 
 
