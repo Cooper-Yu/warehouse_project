@@ -71,7 +71,9 @@ class ShelfGeometryObserver(Node):
             f"frame={measurement.frame_id} "
             f"left=({measurement.left_x:.3f},{measurement.left_y:.3f}) "
             f"right=({measurement.right_x:.3f},{measurement.right_y:.3f}) "
-            f"separation={measurement.euclidean_separation:.3f}"
+            f"inner_span={measurement.euclidean_separation:.3f} "
+            f"center_span={measurement.center_separation:.3f} "
+            f"outer_span={measurement.outer_separation:.3f}"
         )
         target = max(int(self.get_parameter("sample_count").value), 1)
         if len(self.measurements) >= target:
@@ -81,6 +83,12 @@ class ShelfGeometryObserver(Node):
         separations = [
             item.euclidean_separation for item in self.measurements
         ]
+        center_separations = [
+            item.center_separation for item in self.measurements
+        ]
+        outer_separations = [
+            item.outer_separation for item in self.measurements
+        ]
         lateral = [item.lateral_separation for item in self.measurements]
         midpoint_x = [item.midpoint_x for item in self.measurements]
         midpoint_y = [item.midpoint_y for item in self.measurements]
@@ -88,9 +96,13 @@ class ShelfGeometryObserver(Node):
             "GEOMETRY_RESULT "
             f"samples={len(separations)} "
             f"frame={self.measurements[-1].frame_id} "
-            f"separation_median={statistics.median(separations):.4f} "
-            f"separation_min={min(separations):.4f} "
-            f"separation_max={max(separations):.4f} "
+            f"inner_span_median={statistics.median(separations):.4f} "
+            f"center_span_median="
+            f"{statistics.median(center_separations):.4f} "
+            f"outer_span_median="
+            f"{statistics.median(outer_separations):.4f} "
+            f"outer_span_min={min(outer_separations):.4f} "
+            f"outer_span_max={max(outer_separations):.4f} "
             f"lateral_median={statistics.median(lateral):.4f} "
             f"midpoint_x_median={statistics.median(midpoint_x):.4f} "
             f"midpoint_y_median={statistics.median(midpoint_y):.4f}"

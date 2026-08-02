@@ -27,6 +27,8 @@ class LegPairMeasurement:
     midpoint_y: float
     lateral_separation: float
     euclidean_separation: float
+    center_separation: float
+    outer_separation: float
 
 
 def _candidate_at(
@@ -117,18 +119,17 @@ def detect_leg_pair(
     if pair is None:
         return None
 
-    first, second = pair
-    first_index = (
-        first.high_index if first.y < second.y else first.low_index
-    )
-    second_index = (
-        second.low_index if first.y < second.y else second.high_index
-    )
-    first = _candidate_at(scan, first_index, first)
-    second = _candidate_at(scan, second_index, second)
-    left, right = sorted((first, second), key=lambda item: item.y)
+    center_left, center_right = sorted(pair, key=lambda item: item.y)
+    left = _candidate_at(scan, center_left.high_index, center_left)
+    right = _candidate_at(scan, center_right.low_index, center_right)
+    outer_left = _candidate_at(scan, center_left.low_index, center_left)
+    outer_right = _candidate_at(scan, center_right.high_index, center_right)
     dx = right.x - left.x
     dy = right.y - left.y
+    center_dx = center_right.x - center_left.x
+    center_dy = center_right.y - center_left.y
+    outer_dx = outer_right.x - outer_left.x
+    outer_dy = outer_right.y - outer_left.y
     return LegPairMeasurement(
         frame_id=scan.header.frame_id,
         left_x=left.x,
@@ -139,4 +140,6 @@ def detect_leg_pair(
         midpoint_y=(left.y + right.y) / 2.0,
         lateral_separation=abs(dy),
         euclidean_separation=math.hypot(dx, dy),
+        center_separation=math.hypot(center_dx, center_dy),
+        outer_separation=math.hypot(outer_dx, outer_dy),
     )

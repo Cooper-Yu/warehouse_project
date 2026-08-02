@@ -38,6 +38,10 @@ def test_detect_leg_pair_reports_midpoint_and_separation():
 
     assert result is not None
     assert result.frame_id == "laser"
+    assert result.left_x == pytest.approx(math.cos(-0.29))
+    assert result.left_y == pytest.approx(math.sin(-0.29))
+    assert result.right_x == pytest.approx(math.cos(0.29))
+    assert result.right_y == pytest.approx(math.sin(0.29))
     assert result.midpoint_y == pytest.approx(0.0, abs=0.02)
     assert result.euclidean_separation > 0.5
     assert result.euclidean_separation == pytest.approx(
@@ -46,6 +50,8 @@ def test_detect_leg_pair_reports_midpoint_and_separation():
             result.right_y - result.left_y,
         )
     )
+    assert result.outer_separation > result.center_separation
+    assert result.center_separation > result.euclidean_separation
 
 
 def test_below_threshold_scan_returns_no_measurement():
