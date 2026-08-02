@@ -110,6 +110,10 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("measured_drive_timeout_scale", 3.0)
         self.declare_parameter("measured_rotation_timeout_scale", 3.0)
         self.declare_parameter("measured_yaw_tolerance", 0.01)
+        self.declare_parameter("alignment_settle_timeout", 2.0)
+        self.declare_parameter("alignment_settle_sample_count", 3)
+        self.declare_parameter("alignment_settle_yaw_tolerance", 0.01)
+        self.declare_parameter("alignment_required_consecutive_samples", 2)
         self.declare_parameter("entry_odom_yaw_tolerance", 0.03)
         self.declare_parameter("final_drive_distance", 0.30)
         self.declare_parameter("movement_timeout", 55.0)
@@ -441,6 +445,15 @@ class ShelfDetectionServer(Node):
         max_detected_yaw = float(
             self.get_parameter("max_detected_yaw").value
         )
+        required_aligned_samples = max(
+            1,
+            int(
+                self.get_parameter(
+                    "alignment_required_consecutive_samples"
+                ).value
+            ),
+        )
+        aligned_samples = 0
 
         for attempt in range(1, retry_count + 1):
             if time.monotonic() >= deadline:
@@ -467,6 +480,7 @@ class ShelfDetectionServer(Node):
 
             scan_before_motion = self._current_scan_sequence()
             if position_error > position_tolerance:
+                aligned_samples = 0
                 if max_drive <= 0.0:
                     self.get_logger().error(
                         "safe-standoff alignment rejected: maximum staging "
@@ -484,6 +498,10 @@ class ShelfDetectionServer(Node):
                     self._rotate_measured(travel_yaw, deadline)
                 ):
                     return None
+                if abs(travel_yaw) > yaw_tolerance and (
+                    self._wait_for_stable_odom_yaw(deadline) is None
+                ):
+                    return None
                 if not self._drive_forward_measured(
                     min(position_error, max_drive), deadline
                 ):
@@ -491,6 +509,7 @@ class ShelfDetectionServer(Node):
             elif not shelf_heading_aligned(
                 shelf_heading, yaw_tolerance
             ):
+                aligned_samples = 0
                 correction = bounded_yaw_correction(
                     shelf_heading,
                     float(
@@ -506,22 +525,34 @@ class ShelfDetectionServer(Node):
                     correction, deadline
                 ):
                     return None
+                if self._wait_for_stable_odom_yaw(deadline) is None:
+                    return None
             else:
-                accepted_odom_yaw = self._wait_for_odom_yaw(deadline)
+                accepted_odom_yaw = self._wait_for_stable_odom_yaw(deadline)
                 if accepted_odom_yaw is None:
                     self._publish_stop()
                     self.get_logger().error(
                         "safe-standoff alignment rejected: accepted odom "
-                        "yaw unavailable"
+                        "yaw did not settle"
                     )
                     return None
+                aligned_samples += 1
                 self.get_logger().info(
-                    "safe-standoff alignment accepted: "
+                    "safe-standoff alignment candidate: "
+                    f"consecutive={aligned_samples}/"
+                    f"{required_aligned_samples} "
                     f"position_error={position_error:.3f} "
                     f"shelf_normal_yaw={shelf_heading:.3f} "
                     f"accepted_odom_yaw={accepted_odom_yaw:.3f}"
                 )
-                return target, accepted_odom_yaw
+                if aligned_samples >= required_aligned_samples:
+                    self.get_logger().info(
+                        "safe-standoff alignment accepted: "
+                        f"position_error={position_error:.3f} "
+                        f"shelf_normal_yaw={shelf_heading:.3f} "
+                        f"accepted_odom_yaw={accepted_odom_yaw:.3f}"
+                    )
+                    return target, accepted_odom_yaw
 
             target = self._recover_cart_frame_after_motion(
                 scan_before_motion, deadline
@@ -596,18 +627,27 @@ class ShelfDetectionServer(Node):
             time.sleep(0.05)
         return None
 
-    def _lookup_odom_yaw(self) -> Optional[float]:
+    def _lookup_odom_yaw_sample(self) -> Optional[tuple]:
         odom_frame = str(self.get_parameter("odom_frame").value)
         base_frame = str(self.get_parameter("target_base_frame").value)
         try:
             transform = self._tf_buffer.lookup_transform(
                 odom_frame, base_frame, rclpy.time.Time()
             )
-            return planar_yaw_from_quaternion(
-                transform.transform.rotation
+            stamp = transform.header.stamp
+            stamp_nanoseconds = (
+                int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+            )
+            return (
+                stamp_nanoseconds,
+                planar_yaw_from_quaternion(transform.transform.rotation),
             )
         except TransformException:
             return None
+
+    def _lookup_odom_yaw(self) -> Optional[float]:
+        sample = self._lookup_odom_yaw_sample()
+        return None if sample is None else sample[1]
 
     def _wait_for_odom_yaw(self, deadline: float) -> Optional[float]:
         lookup_timeout = max(
@@ -619,6 +659,73 @@ class ShelfDetectionServer(Node):
             if yaw is not None:
                 return yaw
             time.sleep(0.05)
+        return None
+
+    def _wait_for_stable_odom_yaw(
+        self, deadline: float
+    ) -> Optional[float]:
+        """Wait for consecutive fresh odom samples with settled yaw."""
+        self._publish_stop()
+        settle_timeout = max(
+            0.0,
+            float(self.get_parameter("alignment_settle_timeout").value),
+        )
+        settle_deadline = min(
+            deadline, time.monotonic() + settle_timeout
+        )
+        required_samples = max(
+            2,
+            int(
+                self.get_parameter(
+                    "alignment_settle_sample_count"
+                ).value
+            ),
+        )
+        yaw_tolerance = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "alignment_settle_yaw_tolerance"
+                ).value
+            ),
+        )
+        last_stamp = None
+        last_yaw = None
+        stable_samples = 0
+
+        while rclpy.ok() and time.monotonic() < settle_deadline:
+            sample = self._lookup_odom_yaw_sample()
+            if sample is None:
+                time.sleep(0.05)
+                continue
+            stamp, yaw = sample
+            if stamp == last_stamp:
+                time.sleep(0.05)
+                continue
+
+            if last_yaw is None or abs(
+                normalize_angle(yaw - last_yaw)
+            ) <= yaw_tolerance:
+                stable_samples += 1
+            else:
+                stable_samples = 1
+            last_stamp = stamp
+            last_yaw = yaw
+
+            if stable_samples >= required_samples:
+                self.get_logger().info(
+                    "post-rotation odom settled: "
+                    f"yaw={yaw:.3f} samples={stable_samples}/"
+                    f"{required_samples} tolerance={yaw_tolerance:.3f}"
+                )
+                return yaw
+            time.sleep(0.05)
+
+        self._publish_stop()
+        self.get_logger().error(
+            "post-rotation odom settling failed: "
+            f"stable_samples={stable_samples}/{required_samples}"
+        )
         return None
 
     def _accepted_odom_heading_ok(

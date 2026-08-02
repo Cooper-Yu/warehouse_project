@@ -63,6 +63,10 @@ class _AlignmentHarness:
             "max_detected_yaw": 0.60,
             "alignment_heading_gain": 1.0,
             "alignment_max_yaw_correction": 0.40,
+            "alignment_settle_timeout": 2.0,
+            "alignment_settle_sample_count": 3,
+            "alignment_settle_yaw_tolerance": 0.01,
+            "alignment_required_consecutive_samples": 2,
             "movement_timeout": 55.0,
         }
         self.recovered_targets = list(recovered_targets)
@@ -71,6 +75,7 @@ class _AlignmentHarness:
         self.stop_count = 0
         self.elevator_count = 0
         self.accepted_odom_yaw = 3.053559
+        self.settle_count = 0
 
     def get_parameter(self, name):
         return _Parameter(self.parameters[name])
@@ -99,6 +104,10 @@ class _AlignmentHarness:
         self.elevator_count += 1
 
     def _wait_for_odom_yaw(self, _deadline):
+        return self.accepted_odom_yaw
+
+    def _wait_for_stable_odom_yaw(self, _deadline):
+        self.settle_count += 1
         return self.accepted_odom_yaw
 
     def _align_at_safe_standoff(self, target, deadline):
@@ -138,6 +147,10 @@ def test_c9_policy_parameters_are_declared():
     assert declared["measured_drive_timeout_scale"] == 3.0
     assert declared["measured_rotation_timeout_scale"] == 3.0
     assert declared["measured_yaw_tolerance"] == 0.01
+    assert declared["alignment_settle_timeout"] == 2.0
+    assert declared["alignment_settle_sample_count"] == 3
+    assert declared["alignment_settle_yaw_tolerance"] == 0.01
+    assert declared["alignment_required_consecutive_samples"] == 2
     assert declared["entry_odom_yaw_tolerance"] == 0.03
 
 
@@ -253,6 +266,7 @@ def test_alignment_sequence_reobserves_until_staging_and_heading_pass():
             heading_after_first_correction,
         ),
         ("base", 1.0, 0.0, 0.0),
+        ("base", 1.0, 0.0, 0.0),
     ]
     harness = _AlignmentHarness(targets)
 
@@ -271,6 +285,7 @@ def test_alignment_sequence_reobserves_until_staging_and_heading_pass():
     assert harness.rotations == pytest.approx(
         [travel_yaw, -0.40, heading_after_first_correction]
     )
+    assert harness.settle_count == 5
 
 
 def test_alignment_exhaustion_stops_and_blocks_attach_elevator():
@@ -307,6 +322,90 @@ def test_alignment_rejects_missing_accepted_odom_yaw():
 
     assert result is None
     assert harness.stop_count == 1
+
+
+class _SettlingHarness:
+    def __init__(self, samples):
+        self.parameters = {
+            "alignment_settle_timeout": 1.0,
+            "alignment_settle_sample_count": 3,
+            "alignment_settle_yaw_tolerance": 0.01,
+        }
+        self.samples = list(samples)
+        self.stop_count = 0
+
+    def get_parameter(self, name):
+        return _Parameter(self.parameters[name])
+
+    def get_logger(self):
+        return _Logger()
+
+    def _publish_stop(self):
+        self.stop_count += 1
+
+    def _lookup_odom_yaw_sample(self):
+        if not self.samples:
+            return None
+        return self.samples.pop(0)
+
+    def settle(self, deadline):
+        from shelf_detection_server.server import ShelfDetectionServer
+
+        return ShelfDetectionServer._wait_for_stable_odom_yaw(
+            self, deadline
+        )
+
+
+def test_post_rotation_settling_rejects_motion_then_accepts_stable_yaw(
+    monkeypatch,
+):
+    import shelf_detection_server.server as server_module
+
+    clock = _Clock()
+    harness = _SettlingHarness(
+        [
+            (1, 3.081),
+            (2, 3.035),
+            (3, 2.989),
+            (4, 2.989),
+            (5, 2.989),
+        ]
+    )
+    monkeypatch.setattr(server_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(server_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+
+    assert harness.settle(10.0) == pytest.approx(2.989)
+    assert harness.stop_count == 1
+
+
+def test_post_rotation_settling_requires_fresh_timestamps(monkeypatch):
+    import shelf_detection_server.server as server_module
+
+    clock = _Clock()
+    harness = _SettlingHarness(
+        [(1, 2.989), (1, 2.989), (1, 2.989)]
+    )
+    monkeypatch.setattr(server_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(server_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+
+    assert harness.settle(10.0) is None
+    assert harness.stop_count == 2
+
+
+def test_post_rotation_settling_is_wrap_safe(monkeypatch):
+    import shelf_detection_server.server as server_module
+
+    clock = _Clock()
+    harness = _SettlingHarness(
+        [(1, 3.140), (2, -3.139), (3, -3.138)]
+    )
+    monkeypatch.setattr(server_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(server_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
+
+    assert harness.settle(10.0) == pytest.approx(-3.138)
 
 
 def test_heading_correction_uses_shelf_normal_and_is_capped():
@@ -660,7 +759,7 @@ def test_safe_standoff_alignment_reobserves_after_each_motion():
     assert "_rotate_measured" in calls
     assert "_drive_forward_measured" in calls
     assert "_recover_cart_frame_after_motion" in calls
-    assert "_wait_for_odom_yaw" in calls
+    assert "_wait_for_stable_odom_yaw" in calls
     assert "shelf_staging_error" in named_calls
     assert "bounded_yaw_correction" in named_calls
 

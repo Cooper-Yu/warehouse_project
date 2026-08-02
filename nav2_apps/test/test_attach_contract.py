@@ -46,6 +46,7 @@ def test_attach_service_owns_motion_and_elevator_sequence():
     alignment = _function(server_tree, "_align_at_safe_standoff")
     alignment_calls = _called_methods(alignment)
     assert "_rotate_measured" in alignment_calls
+    assert "_wait_for_stable_odom_yaw" in alignment_calls
     assert "_rotate_open_loop" not in alignment_calls
     assert "_recover_cart_frame_after_motion" in alignment_calls
 
