@@ -74,6 +74,8 @@ class ShelfGeometryObserver(Node):
             f"inner_span={measurement.euclidean_separation:.3f} "
             f"center_span={measurement.center_separation:.3f} "
             f"outer_span={measurement.outer_separation:.3f}"
+            f" midpoint_bearing={measurement.midpoint_bearing:.3f}"
+            f" shelf_normal_yaw={measurement.shelf_normal_yaw:.3f}"
         )
         target = max(int(self.get_parameter("sample_count").value), 1)
         if len(self.measurements) >= target:
@@ -92,6 +94,12 @@ class ShelfGeometryObserver(Node):
         lateral = [item.lateral_separation for item in self.measurements]
         midpoint_x = [item.midpoint_x for item in self.measurements]
         midpoint_y = [item.midpoint_y for item in self.measurements]
+        midpoint_bearings = [
+            item.midpoint_bearing for item in self.measurements
+        ]
+        shelf_normal_yaws = [
+            item.shelf_normal_yaw for item in self.measurements
+        ]
         self.get_logger().info(
             "GEOMETRY_RESULT "
             f"samples={len(separations)} "
@@ -105,7 +113,11 @@ class ShelfGeometryObserver(Node):
             f"outer_span_max={max(outer_separations):.4f} "
             f"lateral_median={statistics.median(lateral):.4f} "
             f"midpoint_x_median={statistics.median(midpoint_x):.4f} "
-            f"midpoint_y_median={statistics.median(midpoint_y):.4f}"
+            f"midpoint_y_median={statistics.median(midpoint_y):.4f} "
+            f"midpoint_bearing_median="
+            f"{statistics.median(midpoint_bearings):.4f} "
+            f"shelf_normal_yaw_median="
+            f"{statistics.median(shelf_normal_yaws):.4f}"
         )
         self.succeeded = True
         self.done = True

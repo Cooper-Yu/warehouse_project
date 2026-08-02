@@ -30,6 +30,37 @@ class LegPairMeasurement:
     center_separation: float
     outer_separation: float
 
+    @property
+    def midpoint_bearing(self) -> float:
+        """Return the bearing to the refined leg midpoint."""
+        return math.atan2(self.midpoint_y, self.midpoint_x)
+
+    @property
+    def shelf_normal_yaw(self) -> float:
+        """Return the forward-facing normal of the refined leg cross-axis."""
+        return shelf_normal_yaw(
+            self.left_x,
+            self.left_y,
+            self.right_x,
+            self.right_y,
+        )
+
+
+def normalize_angle(angle: float) -> float:
+    """Normalize an angle to [-pi, pi)."""
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def shelf_normal_yaw(
+    left_x: float,
+    left_y: float,
+    right_x: float,
+    right_y: float,
+) -> float:
+    """Compute the shelf approach normal from the ordered leg cross-axis."""
+    cross_axis_yaw = math.atan2(right_y - left_y, right_x - left_x)
+    return normalize_angle(cross_axis_yaw - math.pi / 2.0)
+
 
 def _candidate_at(
     scan: LaserScan, index: int, source: LegCandidate

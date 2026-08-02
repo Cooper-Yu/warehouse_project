@@ -9,7 +9,10 @@ from sensor_msgs.msg import LaserScan
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from shelf_detection_server.leg_geometry import detect_leg_pair  # noqa: E402
+from shelf_detection_server.leg_geometry import (  # noqa: E402
+    detect_leg_pair,
+    shelf_normal_yaw,
+)
 
 
 def _scan_with_two_legs():
@@ -52,6 +55,17 @@ def test_detect_leg_pair_reports_midpoint_and_separation():
     )
     assert result.outer_separation > result.center_separation
     assert result.center_separation > result.euclidean_separation
+    assert result.midpoint_bearing == pytest.approx(0.0, abs=0.02)
+    assert result.shelf_normal_yaw == pytest.approx(0.0, abs=0.02)
+
+
+def test_shelf_normal_is_distinct_from_midpoint_bearing():
+    midpoint_bearing = math.atan2(-0.46, 1.20)
+    normal_yaw = shelf_normal_yaw(1.15, -0.80, 1.25, -0.13)
+
+    assert midpoint_bearing == pytest.approx(-0.366, abs=0.01)
+    assert normal_yaw == pytest.approx(-0.148, abs=0.01)
+    assert normal_yaw != pytest.approx(midpoint_bearing, abs=0.05)
 
 
 def test_below_threshold_scan_returns_no_measurement():

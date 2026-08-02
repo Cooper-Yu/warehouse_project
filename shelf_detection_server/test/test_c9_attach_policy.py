@@ -147,3 +147,25 @@ def test_final_measured_drive_precedes_elevator_publish():
 
     assert measured_lines
     assert max(measured_lines) < elevator_line
+
+
+def test_heading_observability_does_not_replace_midpoint_yaw_control():
+    tree = _server_tree()
+    attach = _function(tree, "_perform_stepwise_attach")
+    assignments = [
+        node
+        for node in ast.walk(attach)
+        if isinstance(node, ast.Assign)
+    ]
+
+    yaw_assignment = next(
+        node
+        for node in assignments
+        if any(
+            isinstance(target, ast.Name) and target.id == "yaw"
+            for target in node.targets
+        )
+    )
+    assert isinstance(yaw_assignment.value, ast.Call)
+    assert isinstance(yaw_assignment.value.func, ast.Attribute)
+    assert yaw_assignment.value.func.attr == "atan2"

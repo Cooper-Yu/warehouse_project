@@ -22,7 +22,11 @@ from tf2_ros import (
 )
 from warehouse_interfaces.srv import GoToLoading
 
-from shelf_detection_server.leg_geometry import detect_leg_pair
+from shelf_detection_server.leg_geometry import (
+    LegPairMeasurement,
+    detect_leg_pair,
+    shelf_normal_yaw,
+)
 
 
 def c9_yaw_correction_enabled(
@@ -136,8 +140,14 @@ class ShelfDetectionServer(Node):
             )
             return response
 
-        self._publish_cart_frame(*target)
+        self._publish_cart_frame(*target[:3])
         if not request.attach_to_shelf:
+            _, x, y, shelf_heading = target
+            self.get_logger().info(
+                "heading observation: mode=detection-only "
+                f"midpoint_bearing={math.atan2(y, x):.3f} "
+                f"shelf_normal_yaw={shelf_heading:.3f}"
+            )
             response.complete = True
             self.get_logger().info(
                 "complete=true: detection-only cart_frame published"
@@ -205,11 +215,7 @@ class ShelfDetectionServer(Node):
         )
         if measurement is None:
             return None
-        return self._transform_to_base(
-            measurement.midpoint_x,
-            measurement.midpoint_y,
-            measurement.frame_id,
-        )
+        return self._transform_detection_to_base(measurement)
 
     def _perform_stepwise_attach(self, initial_target: tuple) -> bool:
         deadline = time.monotonic() + float(
@@ -219,7 +225,7 @@ class ShelfDetectionServer(Node):
         step = 0
         center_approach_complete = False
         while rclpy.ok() and time.monotonic() < deadline:
-            frame_id, x, y = target
+            frame_id, x, y, shelf_heading = target
             self._publish_cart_frame(frame_id, x, y)
             yaw = math.atan2(y, x)
             max_yaw = float(self.get_parameter("max_detected_yaw").value)
@@ -238,7 +244,9 @@ class ShelfDetectionServer(Node):
             )
             self.get_logger().info(
                 "stepwise attach sample: "
-                f"step={step} x={x:.3f} y={y:.3f} yaw={yaw:.3f}"
+                f"step={step} x={x:.3f} y={y:.3f} "
+                f"midpoint_bearing={yaw:.3f} "
+                f"shelf_normal_yaw={shelf_heading:.3f}"
             )
             if x <= center_x and abs(y) <= center_y:
                 center_approach_complete = True
@@ -560,22 +568,48 @@ class ShelfDetectionServer(Node):
             f"published elevator-up {count} times after successful final push"
         )
 
-    def _transform_to_base(self, x: float, y: float, source_frame: str):
+    def _transform_detection_to_base(
+        self, measurement: LegPairMeasurement
+    ) -> Optional[tuple]:
         target_frame = str(self.get_parameter("target_base_frame").value)
+        source_frame = measurement.frame_id
         if not source_frame:
             return None
         if source_frame == target_frame:
-            return target_frame, x, y
-        point = PointStamped()
-        point.header.frame_id = source_frame
-        point.point.x = x
-        point.point.y = y
+            return (
+                target_frame,
+                measurement.midpoint_x,
+                measurement.midpoint_y,
+                measurement.shelf_normal_yaw,
+            )
         try:
             transform = self._tf_buffer.lookup_transform(
                 target_frame, source_frame, rclpy.time.Time()
             )
-            transformed = do_transform_point(point, transform)
-            return target_frame, transformed.point.x, transformed.point.y
+
+            def transform_xy(x: float, y: float) -> tuple:
+                point = PointStamped()
+                point.header.frame_id = source_frame
+                point.point.x = x
+                point.point.y = y
+                transformed = do_transform_point(point, transform)
+                return transformed.point.x, transformed.point.y
+
+            midpoint_x, midpoint_y = transform_xy(
+                measurement.midpoint_x, measurement.midpoint_y
+            )
+            left_x, left_y = transform_xy(
+                measurement.left_x, measurement.left_y
+            )
+            right_x, right_y = transform_xy(
+                measurement.right_x, measurement.right_y
+            )
+            return (
+                target_frame,
+                midpoint_x,
+                midpoint_y,
+                shelf_normal_yaw(left_x, left_y, right_x, right_y),
+            )
         except TransformException as error:
             self.get_logger().warning(
                 "cart_frame transform unavailable: %s" % error
