@@ -37,6 +37,16 @@ def test_phase_transitions_cover_navigation_and_shelf_events():
     assert phase == "NAV_TO_SHIPPING"
     phase = phase_from_log("shipping_position goal succeeded", phase)
     assert phase == "AT_SHIPPING"
+    phase = phase_from_log("published elevator-down 5 times", phase)
+    assert phase == "ELEVATOR_DOWN"
+    phase = phase_from_log("lower_acceptance_pending", phase)
+    assert phase == "LOWER_ACCEPTANCE_PENDING"
+    phase = phase_from_log("bounded shelf exit started", phase)
+    assert phase == "SHELF_EXIT"
+    phase = phase_from_log("CLEAR_OF_SHELF verified", phase)
+    assert phase == "CLEAR_OF_SHELF"
+    phase = phase_from_log("unloaded_footprint_verified", phase)
+    assert phase == "UNLOADED_FOOTPRINT_VERIFIED"
 
 
 def test_unrelated_log_keeps_current_phase():

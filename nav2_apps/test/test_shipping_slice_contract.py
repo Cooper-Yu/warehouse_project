@@ -38,8 +38,9 @@ def test_shipping_slice_stops_at_shipping_without_unload_actions():
     assert "cancelTask" in calls
     assert "AT_SHIPPING" in source
     assert "--shipping-timeout" in source
-    assert "elevator_down" not in source
-    assert "elevator-down" not in source
+    function_source = ast.get_source_segment(source, shipping)
+    assert "elevator_down" not in function_source
+    assert "elevator-down" not in function_source
 
 
 def test_shipping_mode_requires_confirmations_and_loaded_footprint():

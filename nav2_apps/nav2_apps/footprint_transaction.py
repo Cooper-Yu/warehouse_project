@@ -89,7 +89,7 @@ def run_compensating_transaction(
     snapshot: Callable[[str], FootprintSnapshot],
     set_value: Callable[[str, str], bool],
     read_value: Callable[[str], str],
-    verify_loaded: Callable[[Dict[str, FootprintSnapshot]], bool],
+    verify_desired: Callable[[Dict[str, FootprintSnapshot]], bool],
     verify_restored: Callable[[Dict[str, FootprintSnapshot]], bool],
 ) -> TransactionResult:
     """Apply both targets and restore snapshots after partial failure."""
@@ -109,12 +109,12 @@ def run_compensating_transaction(
             if read_value(target) != desired:
                 failure = f"readback mismatch on {target}"
                 break
-        if not failure and not verify_loaded(originals):
-            failure = "published loaded footprint verification failed"
+        if not failure and not verify_desired(originals):
+            failure = "published desired footprint verification failed"
     except Exception as error:
         failure = f"transaction exception: {error}"
     if not failure:
-        return TransactionResult(True, True, "loaded footprint verified")
+        return TransactionResult(True, True, "desired footprint verified")
 
     rollback_ok = True
     for target in targets:
@@ -276,12 +276,13 @@ class RosFootprintBackend:
         return self._verify_messages(expected)
 
 
-def apply_loaded_footprint(
+def apply_footprint(
     node: Node,
     desired: str,
     timeout: float,
     tolerance: float,
 ) -> TransactionResult:
+    """Apply and verify a footprint, compensating to live snapshots."""
     parse_polygon(desired)
     backend = RosFootprintBackend(node, timeout, tolerance)
     return run_compensating_transaction(
@@ -293,3 +294,13 @@ def apply_loaded_footprint(
         lambda originals: backend.verify_loaded(desired, originals),
         backend.verify_restored,
     )
+
+
+def apply_loaded_footprint(
+    node: Node,
+    desired: str,
+    timeout: float,
+    tolerance: float,
+) -> TransactionResult:
+    """Backward-compatible wrapper for the loaded-footprint slice."""
+    return apply_footprint(node, desired, timeout, tolerance)
