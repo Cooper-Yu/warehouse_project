@@ -37,7 +37,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "use_sim_time",
             default_value=PythonExpression([
-                "'", map_file, "' == 'warehouse_map_sim.yaml'"
+                "'sim' in '", map_file, "'.lower()"
             ]),
             description=(
                 "Use simulation clock. Defaults from map_file: sim map=true, "

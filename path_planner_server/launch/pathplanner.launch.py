@@ -72,7 +72,14 @@ def _navigation_nodes(condition, use_sim_time, files):
 
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
+    use_keepout = LaunchConfiguration("use_keepout")
+    keepout_mask_file = LaunchConfiguration("keepout_mask_file")
     package_share = FindPackageShare("path_planner_server")
+    map_package_share = FindPackageShare("map_server")
+
+    keepout_mask_yaml = PathJoinSubstitution(
+        [map_package_share, "config", keepout_mask_file]
+    )
 
     common = {
         "bt_xml": PathJoinSubstitution(
@@ -100,6 +107,74 @@ def generate_launch_description():
                 "use_sim_time",
                 default_value="true",
                 description="Use simulation time for the navigation nodes.",
+            ),
+            DeclareLaunchArgument(
+                "use_keepout",
+                default_value=use_sim_time,
+                description=(
+                    "Start the keepout mask/filter chain. Defaults to enabled "
+                    "for simulation and disabled for the still-gated real profile."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "keepout_mask_file",
+                default_value="warehouse_map_keepout_sim_mask.yaml",
+                description="Keepout mask YAML file in map_server/config.",
+            ),
+            Node(
+                package="nav2_map_server",
+                executable="map_server",
+                name="filter_mask_server",
+                output="screen",
+                condition=IfCondition(use_keepout),
+                parameters=[
+                    {
+                        "yaml_filename": keepout_mask_yaml,
+                        "topic_name": "keepout_filter_mask",
+                        "frame_id": "map",
+                        "use_sim_time": ParameterValue(
+                            use_sim_time, value_type=bool
+                        ),
+                    }
+                ],
+            ),
+            Node(
+                package="nav2_map_server",
+                executable="costmap_filter_info_server",
+                name="costmap_filter_info_server",
+                output="screen",
+                condition=IfCondition(use_keepout),
+                parameters=[
+                    {
+                        "type": 0,
+                        "filter_info_topic": "/costmap_filter_info",
+                        "mask_topic": "/keepout_filter_mask",
+                        "base": 0.0,
+                        "multiplier": 1.0,
+                        "use_sim_time": ParameterValue(
+                            use_sim_time, value_type=bool
+                        ),
+                    }
+                ],
+            ),
+            Node(
+                package="nav2_lifecycle_manager",
+                executable="lifecycle_manager",
+                name="lifecycle_manager_keepout",
+                output="screen",
+                condition=IfCondition(use_keepout),
+                parameters=[
+                    {
+                        "autostart": True,
+                        "node_names": [
+                            "filter_mask_server",
+                            "costmap_filter_info_server",
+                        ],
+                        "use_sim_time": ParameterValue(
+                            use_sim_time, value_type=bool
+                        ),
+                    }
+                ],
             ),
             *_navigation_nodes(IfCondition(use_sim_time), use_sim_time, sim_files),
             *_navigation_nodes(UnlessCondition(use_sim_time), use_sim_time, real_files),

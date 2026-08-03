@@ -46,7 +46,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "use_sim_time",
             default_value=PythonExpression([
-                "'", map_file, "' == 'warehouse_map_sim.yaml'"
+                "'sim' in '", map_file, "'.lower()"
             ]),
             description=(
                 "Use simulation clock. Defaults from map_file: sim map=true, "
@@ -55,8 +55,11 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "use_rviz",
-            default_value="true",
-            description="Start the localization RViz instance.",
+            default_value="false",
+            description=(
+                "Start the localization-only RViz instance. Disabled by default "
+                "because the Checkpoint 12 path planner launch owns RViz."
+            ),
         ),
         DeclareLaunchArgument(
             "amcl_config",
