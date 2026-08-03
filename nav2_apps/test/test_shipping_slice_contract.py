@@ -58,6 +58,92 @@ def test_shipping_mode_requires_confirmations_and_loaded_footprint():
     assert "initial pose override is not allowed" in source
 
 
+def test_shipping_alignment_only_has_no_navigation_goal():
+    source_path = (
+        Path(__file__).parents[1]
+        / "nav2_apps"
+        / "move_shelf_to_ship.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    alignment_only = _function(tree, "_align_at_shipping")
+    function_source = ast.get_source_segment(source, alignment_only)
+    calls = [
+        node.func.attr
+        for node in ast.walk(alignment_only)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+    ]
+
+    assert "--shipping-alignment-only" in source
+    assert "_accept_or_align_shipping_pose" in function_source
+    assert "goToPose" not in calls
+    assert "elevator_down" not in function_source
+    assert "AT_SHIPPING" in function_source
+
+
+def test_shipping_alignment_only_accepts_without_navigation(monkeypatch):
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_accept_or_align_shipping_pose",
+        lambda *_args, **_kwargs: True,
+    )
+    navigator = FakeNavigator(True, 1)
+
+    result = move_shelf_to_ship._align_at_shipping(
+        navigator,
+        PoseStamped(),
+        "robot_base_footprint",
+        0.25,
+        0.10,
+        0.40,
+        20.0,
+        1.0,
+        5.0,
+        0.5,
+        3,
+    )
+
+    assert result == ExitCode.SUCCEEDED
+    assert any(
+        "no goToPose goal will be sent" in message
+        for _level, message in navigator.logger.messages
+    )
+    assert any(
+        "AT_SHIPPING" in message
+        for _level, message in navigator.logger.messages
+    )
+
+
+def test_shipping_alignment_only_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_accept_or_align_shipping_pose",
+        lambda *_args, **_kwargs: False,
+    )
+    navigator = FakeNavigator(True, 1)
+
+    result = move_shelf_to_ship._align_at_shipping(
+        navigator,
+        PoseStamped(),
+        "robot_base_footprint",
+        0.25,
+        0.10,
+        0.40,
+        20.0,
+        1.0,
+        5.0,
+        0.5,
+        3,
+    )
+
+    assert result == ExitCode.UNKNOWN
+    assert any(
+        "SHIPPING_ALIGNMENT_PENDING" in message
+        for _level, message in navigator.logger.messages
+    )
+
+
 class FakeLogger:
     def __init__(self):
         self.messages = []

@@ -114,6 +114,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--shipping-alignment-only",
+        action="store_true",
+        help=(
+            "From an already stopped shipping pose, verify loaded "
+            "footprints and run only bounded final yaw alignment."
+        ),
+    )
+    parser.add_argument(
         "--shipping-x", type=float, default=SIM_SHIPPING_POSE[0]
     )
     parser.add_argument(
@@ -950,6 +958,47 @@ def _navigate_to_shipping(
     return ExitCode.SUCCEEDED
 
 
+def _align_at_shipping(
+    navigator: BasicNavigator,
+    shipping_pose: PoseStamped,
+    base_frame: str,
+    position_tolerance: float,
+    yaw_tolerance: float,
+    max_yaw_correction: float,
+    alignment_timeout: float,
+    alignment_settle: float,
+    lookup_timeout: float,
+    correction_ratio: float,
+    max_correction_rounds: int,
+) -> ExitCode:
+    """Align an already stopped shipping pose without sending a Nav2 goal."""
+    navigator.get_logger().info(
+        "Shipping alignment-only mode: no goToPose goal will be sent"
+    )
+    if not _accept_or_align_shipping_pose(
+        navigator,
+        shipping_pose,
+        base_frame,
+        position_tolerance,
+        yaw_tolerance,
+        max_yaw_correction,
+        alignment_timeout,
+        alignment_settle,
+        lookup_timeout,
+        correction_ratio,
+        max_correction_rounds,
+    ):
+        navigator.get_logger().error(
+            "Alignment-only slice stopped at SHIPPING_ALIGNMENT_PENDING"
+        )
+        return ExitCode.UNKNOWN
+    navigator.get_logger().info(
+        "shipping pose accepted; alignment-only slice stopped at "
+        "AT_SHIPPING"
+    )
+    return ExitCode.SUCCEEDED
+
+
 def _navigate_to_init(
     navigator: BasicNavigator,
     init_pose: PoseStamped,
@@ -1006,14 +1055,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.approach_and_elevator,
             args.loaded_footprint_only,
             args.shipping_only,
+            args.shipping_alignment_only,
             args.lower_only,
             args.exit_restore_only,
             args.return_only,
         )
         if sum(bool(mode) for mode in operation_modes) > 1:
             navigator.get_logger().error(
-                "detection, attach, footprint, shipping, lower, exit, and "
-                "return "
+                "detection, attach, footprint, shipping, alignment, lower, "
+                "exit, and return "
                 "modes are mutually exclusive"
             )
             return int(ExitCode.UNKNOWN)
@@ -1253,6 +1303,62 @@ def main(argv: Optional[List[str]] = None) -> int:
                     navigator,
                     shipping_pose,
                     args.shipping_timeout,
+                    args.base_frame,
+                    args.shipping_position_tolerance,
+                    args.shipping_yaw_tolerance,
+                    args.shipping_max_yaw_correction,
+                    args.shipping_alignment_timeout,
+                    args.shipping_alignment_settle,
+                    args.shipping_pose_lookup_timeout,
+                    args.shipping_yaw_correction_ratio,
+                    args.shipping_yaw_correction_rounds,
+                )
+            )
+
+        if args.shipping_alignment_only:
+            if not (
+                args.confirm_lift_accepted and args.confirm_robot_stopped
+            ):
+                navigator.get_logger().error(
+                    "shipping-alignment-only requires explicit lift and "
+                    "stopped-state confirmations"
+                )
+                return int(ExitCode.UNKNOWN)
+            if initial_pose is not None:
+                navigator.get_logger().error(
+                    "shipping-alignment-only requires existing AMCL "
+                    "localization; initial pose override is not allowed"
+                )
+                return int(ExitCode.UNKNOWN)
+            if not _wait_for_existing_localization(
+                navigator,
+                args.localization_timeout,
+            ):
+                navigator.get_logger().error(
+                    "No existing AMCL pose received before localization "
+                    "timeout"
+                )
+                return int(ExitCode.UNKNOWN)
+
+            navigator.waitUntilNav2Active()
+            if not _apply_loaded_footprint_verified(
+                navigator,
+                args.loaded_footprint,
+                args.footprint_timeout,
+                args.footprint_edge_tolerance,
+            ):
+                return int(ExitCode.UNKNOWN)
+            shipping_pose = _pose(
+                navigator,
+                args.frame_id,
+                args.shipping_x,
+                args.shipping_y,
+                args.shipping_yaw,
+            )
+            return int(
+                _align_at_shipping(
+                    navigator,
+                    shipping_pose,
                     args.base_frame,
                     args.shipping_position_tolerance,
                     args.shipping_yaw_tolerance,
