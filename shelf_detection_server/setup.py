@@ -12,10 +12,12 @@ setup(
         ("share/" + package_name + "/config", [
             "config/real_staging.yaml",
             "config/real_entry.yaml",
+            "config/real_entry_refine.yaml",
         ]),
         ("share/" + package_name + "/launch", [
             "launch/real_staging.launch.py",
             "launch/real_entry.launch.py",
+            "launch/real_entry_refine.launch.py",
         ]),
     ],
     install_requires=["setuptools"],

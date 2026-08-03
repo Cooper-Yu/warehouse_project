@@ -135,6 +135,18 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("detection_timeout", 3.0)
         self.declare_parameter("staging_only", False)
         self.declare_parameter("entry_only", False)
+        self.declare_parameter("entry_refine_only", False)
+        self.declare_parameter(
+            "entry_refine_required_completed_distance", 0.303
+        )
+        self.declare_parameter(
+            "entry_refine_confirmed_completed_distance", 0.0
+        )
+        self.declare_parameter("entry_refine_confirmation_tolerance", 0.01)
+        self.declare_parameter("entry_refine_distance", 0.47)
+        self.declare_parameter("entry_refine_max_distance", 0.50)
+        self.declare_parameter("entry_refine_speed", 0.03)
+        self.declare_parameter("entry_refine_timeout", 25.0)
         self.declare_parameter("target_base_frame", "robot_base_footprint")
         self.declare_parameter("forward_speed", 0.10)
         self.declare_parameter("rotate_speed", 0.20)
@@ -243,6 +255,32 @@ class ShelfDetectionServer(Node):
     def _handle_request(
         self, request: GoToLoading.Request, response: GoToLoading.Response
     ) -> GoToLoading.Response:
+        staging_only = bool(self.get_parameter("staging_only").value)
+        entry_only = bool(self.get_parameter("entry_only").value)
+        entry_refine_only = bool(
+            self.get_parameter("entry_refine_only").value
+        )
+        if sum((staging_only, entry_only, entry_refine_only)) > 1:
+            self._publish_stop()
+            response.complete = False
+            self.get_logger().error(
+                "complete=false: staging_only, entry_only, and "
+                "entry_refine_only are mutually exclusive"
+            )
+            return response
+
+        if entry_refine_only:
+            if not request.attach_to_shelf:
+                self._publish_stop()
+                response.complete = False
+                self.get_logger().error(
+                    "complete=false: entry-refine-only requires explicit "
+                    "attach_to_shelf=true confirmation"
+                )
+                return response
+            response.complete = self._perform_entry_refine_only()
+            return response
+
         target = self._wait_for_cart_frame()
         if target is None:
             self._publish_stop()
@@ -263,17 +301,6 @@ class ShelfDetectionServer(Node):
             response.complete = True
             self.get_logger().info(
                 "complete=true: detection-only cart_frame published"
-            )
-            return response
-
-        staging_only = bool(self.get_parameter("staging_only").value)
-        entry_only = bool(self.get_parameter("entry_only").value)
-        if staging_only and entry_only:
-            self._publish_stop()
-            response.complete = False
-            self.get_logger().error(
-                "complete=false: staging_only and entry_only are mutually "
-                "exclusive"
             )
             return response
 
@@ -316,6 +343,99 @@ class ShelfDetectionServer(Node):
             f"x={x:.3f} y={y:.3f} "
             f"shelf_normal_yaw={shelf_heading:.3f}; "
             "no shelf entry or elevator command was issued"
+        )
+        return True
+
+    def _perform_entry_refine_only(self) -> bool:
+        """Finish the confirmed partial entry by bounded odom distance."""
+        required_completed = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "entry_refine_required_completed_distance"
+                ).value
+            ),
+        )
+        confirmed_completed = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "entry_refine_confirmed_completed_distance"
+                ).value
+            ),
+        )
+        confirmation_tolerance = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "entry_refine_confirmation_tolerance"
+                ).value
+            ),
+        )
+        if abs(confirmed_completed - required_completed) > (
+            confirmation_tolerance
+        ):
+            self._publish_stop()
+            self.get_logger().error(
+                "entry-refine-only rejected: completed-distance "
+                f"confirmation={confirmed_completed:.3f} required="
+                f"{required_completed:.3f} tolerance="
+                f"{confirmation_tolerance:.3f}"
+            )
+            return False
+
+        distance = max(
+            0.0,
+            float(self.get_parameter("entry_refine_distance").value),
+        )
+        max_distance = max(
+            0.0,
+            float(self.get_parameter("entry_refine_max_distance").value),
+        )
+        speed = max(
+            0.0,
+            float(self.get_parameter("entry_refine_speed").value),
+        )
+        if distance <= 0.0 or distance > max_distance or speed <= 0.0:
+            self._publish_stop()
+            self.get_logger().error(
+                "entry-refine-only rejected: invalid bounded motion "
+                f"distance={distance:.3f}/{max_distance:.3f} "
+                f"speed={speed:.3f}"
+            )
+            return False
+
+        deadline = time.monotonic() + max(
+            0.0,
+            float(self.get_parameter("entry_refine_timeout").value),
+        )
+        accepted_odom_yaw = self._wait_for_stable_odom_yaw(deadline)
+        if accepted_odom_yaw is None:
+            self._publish_stop()
+            self.get_logger().error(
+                "entry-refine-only rejected: stopped odom yaw unavailable"
+            )
+            return False
+
+        self.get_logger().warning(
+            "entry-refine-only started from confirmed partial entry: "
+            f"completed={confirmed_completed:.3f} "
+            f"remaining_target={distance:.3f} speed={speed:.3f} "
+            f"accepted_odom_yaw={accepted_odom_yaw:.3f}"
+        )
+        if not self._drive_forward_measured(distance, deadline, speed):
+            self._publish_stop()
+            return False
+        if not self._accepted_odom_heading_ok(
+            accepted_odom_yaw, deadline
+        ):
+            self._publish_stop()
+            return False
+
+        self._publish_stop()
+        self.get_logger().info(
+            "complete=true: entry-refine-only bounded cart-center "
+            "distance complete; stopped before final push and elevator"
         )
         return True
 
