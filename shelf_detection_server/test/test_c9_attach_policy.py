@@ -559,6 +559,54 @@ def test_alignment_exhaustion_stops_and_blocks_attach_elevator():
     assert harness.elevator_count == 0
 
 
+def test_final_correction_keeps_bounded_fresh_acceptance_observations():
+    def target(heading):
+        return ("base", math.cos(heading), math.sin(heading), heading)
+
+    aligned_target = target(0.02)
+    harness = _AlignmentHarness(
+        [
+            target(0.05),
+            aligned_target,
+            aligned_target,
+        ],
+        retry_count=2,
+        stable_yaws=[0.0, 0.0, 3.053559, 3.053559],
+    )
+
+    result = harness._align_at_safe_standoff(
+        target(0.20),
+        time.monotonic() + 10.0,
+    )
+
+    assert result == (aligned_target, harness.accepted_odom_yaw)
+    assert harness.rotations == pytest.approx([0.10, 0.025])
+    assert len(harness.rotations) == 2
+    assert harness.recovered_targets == []
+
+
+def test_exhausted_correction_budget_cannot_create_extra_motion():
+    def target(heading):
+        return ("base", math.cos(heading), math.sin(heading), heading)
+
+    harness = _AlignmentHarness(
+        [
+            target(0.10),
+            target(0.08),
+        ],
+        retry_count=1,
+    )
+
+    result = harness._align_at_safe_standoff(
+        target(0.20),
+        time.monotonic() + 10.0,
+    )
+
+    assert result is None
+    assert harness.rotations == pytest.approx([0.10])
+    assert harness.stop_count == 1
+
+
 def test_alignment_rejects_missing_accepted_odom_yaw():
     harness = _AlignmentHarness([])
     harness.accepted_odom_yaw = None

@@ -602,8 +602,10 @@ class ShelfDetectionServer(Node):
             ),
         )
         aligned_samples = 0
+        correction_count = 0
+        observation_limit = retry_count + required_aligned_samples
 
-        for attempt in range(1, retry_count + 1):
+        for observation in range(1, observation_limit + 1):
             if time.monotonic() >= deadline:
                 break
             _, x, y, shelf_heading = target
@@ -621,7 +623,9 @@ class ShelfDetectionServer(Node):
             position_error = math.hypot(error_x, error_y)
             self.get_logger().info(
                 "safe-standoff alignment sample: "
-                f"attempt={attempt}/{retry_count} x={x:.3f} y={y:.3f} "
+                f"observation={observation}/{observation_limit} "
+                f"corrections={correction_count}/{retry_count} "
+                f"x={x:.3f} y={y:.3f} "
                 f"shelf_normal_yaw={shelf_heading:.3f} "
                 f"staging_error={position_error:.3f}"
             )
@@ -629,6 +633,13 @@ class ShelfDetectionServer(Node):
             scan_before_motion = self._current_scan_sequence()
             if position_error > position_tolerance:
                 aligned_samples = 0
+                if correction_count >= retry_count:
+                    self.get_logger().error(
+                        "safe-standoff alignment stopped: correction "
+                        "budget exhausted before position tolerance"
+                    )
+                    break
+                correction_count += 1
                 if max_drive <= 0.0:
                     self.get_logger().error(
                         "safe-standoff alignment rejected: maximum staging "
@@ -740,6 +751,13 @@ class ShelfDetectionServer(Node):
                 shelf_heading, yaw_tolerance
             ):
                 aligned_samples = 0
+                if correction_count >= retry_count:
+                    self.get_logger().error(
+                        "safe-standoff alignment stopped: correction "
+                        "budget exhausted before heading tolerance"
+                    )
+                    break
+                correction_count += 1
                 (
                     correction,
                     correction_speed,
@@ -823,7 +841,8 @@ class ShelfDetectionServer(Node):
 
         self._publish_stop()
         self.get_logger().error(
-            "safe-standoff alignment exhausted before entering tolerance"
+            "safe-standoff alignment exhausted before consecutive "
+            "position and heading acceptance"
         )
         return None
 
