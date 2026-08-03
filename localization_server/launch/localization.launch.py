@@ -22,16 +22,16 @@ def generate_launch_description():
     initial_yaw = LaunchConfiguration("initial_yaw")
     # map_file selects matching clock and AMCL defaults.
     use_sim_time_value = ParameterValue(use_sim_time, value_type=bool)
-    auto_initial_pose_value = ParameterValue(
-        PythonExpression([
-            "'true' if '",
-            auto_initial_pose,
-            "'.lower() in ('true', '1') and '",
-            use_sim_time,
-            "'.lower() in ('true', '1') else 'false'",
-        ]),
-        value_type=bool,
-    )
+    auto_initial_pose_enabled = PythonExpression([
+        "'true' if '",
+        auto_initial_pose,
+        "'.lower() in ('true', '1') and '",
+        use_sim_time,
+        "'.lower() in ('true', '1') else 'false'",
+    ])
+    initial_covariance_x = LaunchConfiguration("initial_covariance_x")
+    initial_covariance_y = LaunchConfiguration("initial_covariance_y")
+    initial_covariance_yaw = LaunchConfiguration("initial_covariance_yaw")
 
     map_yaml = PathJoinSubstitution([
         FindPackageShare("map_server"),
@@ -102,6 +102,24 @@ def generate_launch_description():
         DeclareLaunchArgument("initial_x", default_value="0.0"),
         DeclareLaunchArgument("initial_y", default_value="0.0"),
         DeclareLaunchArgument("initial_yaw", default_value="0.0"),
+        DeclareLaunchArgument(
+            "initial_covariance_x",
+            default_value="0.25",
+            description="Initial x variance published on /initialpose.",
+        ),
+        DeclareLaunchArgument(
+            "initial_covariance_y",
+            default_value="0.25",
+            description="Initial y variance published on /initialpose.",
+        ),
+        DeclareLaunchArgument(
+            "initial_covariance_yaw",
+            default_value="0.06853891945200942",
+            description=(
+                "Initial yaw variance published on /initialpose "
+                "(15 degree standard deviation by default)."
+            ),
+        ),
         Node(
             package="nav2_map_server",
             executable="map_server",
@@ -121,17 +139,9 @@ def generate_launch_description():
                 amcl_params,
                 {
                     "use_sim_time": use_sim_time_value,
-                    "set_initial_pose": auto_initial_pose_value,
-                    "initial_pose.x": ParameterValue(
-                        initial_x, value_type=float
-                    ),
-                    "initial_pose.y": ParameterValue(
-                        initial_y, value_type=float
-                    ),
-                    "initial_pose.z": 0.0,
-                    "initial_pose.yaw": ParameterValue(
-                        initial_yaw, value_type=float
-                    ),
+                    # The helper below publishes a PoseWithCovarianceStamped.
+                    # Keep AMCL's parameter-only zero-covariance path disabled.
+                    "set_initial_pose": False,
                 },
             ],
         ),
@@ -144,6 +154,30 @@ def generate_launch_description():
                 "use_sim_time": use_sim_time_value,
                 "autostart": True,
                 "node_names": ["map_server", "amcl"],
+            }],
+        ),
+        Node(
+            package="localization_server",
+            executable="auto_initial_pose.py",
+            name="auto_initial_pose",
+            output="screen",
+            condition=IfCondition(auto_initial_pose_enabled),
+            parameters=[{
+                "use_sim_time": use_sim_time_value,
+                "initial_x": ParameterValue(initial_x, value_type=float),
+                "initial_y": ParameterValue(initial_y, value_type=float),
+                "initial_yaw": ParameterValue(
+                    initial_yaw, value_type=float
+                ),
+                "covariance_x": ParameterValue(
+                    initial_covariance_x, value_type=float
+                ),
+                "covariance_y": ParameterValue(
+                    initial_covariance_y, value_type=float
+                ),
+                "covariance_yaw": ParameterValue(
+                    initial_covariance_yaw, value_type=float
+                ),
             }],
         ),
         Node(
