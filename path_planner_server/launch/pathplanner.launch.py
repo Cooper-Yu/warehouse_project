@@ -1,7 +1,11 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -127,8 +131,16 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "keepout_mask_file",
-                default_value="warehouse_map_keepout_sim_mask.yaml",
-                description="Keepout mask YAML file in map_server/config.",
+                default_value=PythonExpression([
+                    "'warehouse_map_keepout_sim_mask.yaml' if '",
+                    use_sim_time,
+                    "'.lower() in ('true', '1') else ",
+                    "'warehouse_map_keepout_real_mask.yaml'",
+                ]),
+                description=(
+                    "Keepout mask YAML file in map_server/config. Defaults "
+                    "to the matching simulation or real mask."
+                ),
             ),
             Node(
                 package="nav2_map_server",
