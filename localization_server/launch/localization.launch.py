@@ -16,8 +16,22 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     amcl_config = LaunchConfiguration("amcl_config")
     use_rviz = LaunchConfiguration("use_rviz")
-    # map_file selects matching clock and AMCL defaults; both remain overridable.
+    auto_initial_pose = LaunchConfiguration("auto_initial_pose")
+    initial_x = LaunchConfiguration("initial_x")
+    initial_y = LaunchConfiguration("initial_y")
+    initial_yaw = LaunchConfiguration("initial_yaw")
+    # map_file selects matching clock and AMCL defaults.
     use_sim_time_value = ParameterValue(use_sim_time, value_type=bool)
+    auto_initial_pose_value = ParameterValue(
+        PythonExpression([
+            "'true' if '",
+            auto_initial_pose,
+            "'.lower() in ('true', '1') and '",
+            use_sim_time,
+            "'.lower() in ('true', '1') else 'false'",
+        ]),
+        value_type=bool,
+    )
 
     map_yaml = PathJoinSubstitution([
         FindPackageShare("map_server"),
@@ -41,7 +55,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "map_file",
             default_value="warehouse_map_sim.yaml",
-            description="Saved map YAML file to load from the map_server config folder.",
+            description=(
+                "Saved map YAML file to load from the map_server config "
+                "folder."
+            ),
         ),
         DeclareLaunchArgument(
             "use_sim_time",
@@ -57,7 +74,8 @@ def generate_launch_description():
             "use_rviz",
             default_value="false",
             description=(
-                "Start the localization-only RViz instance. Disabled by default "
+                "Start the localization-only RViz instance. Disabled by "
+                "default "
                 "because the Checkpoint 12 path planner launch owns RViz."
             ),
         ),
@@ -73,6 +91,17 @@ def generate_launch_description():
                 "selected by use_sim_time."
             ),
         ),
+        DeclareLaunchArgument(
+            "auto_initial_pose",
+            default_value="false",
+            description=(
+                "Initialize AMCL from the configured pose only when this "
+                "flag and use_sim_time are true."
+            ),
+        ),
+        DeclareLaunchArgument("initial_x", default_value="0.0"),
+        DeclareLaunchArgument("initial_y", default_value="0.0"),
+        DeclareLaunchArgument("initial_yaw", default_value="0.0"),
         Node(
             package="nav2_map_server",
             executable="map_server",
@@ -88,7 +117,23 @@ def generate_launch_description():
             executable="amcl",
             name="amcl",
             output="screen",
-            parameters=[amcl_params, {"use_sim_time": use_sim_time_value}],
+            parameters=[
+                amcl_params,
+                {
+                    "use_sim_time": use_sim_time_value,
+                    "set_initial_pose": auto_initial_pose_value,
+                    "initial_pose.x": ParameterValue(
+                        initial_x, value_type=float
+                    ),
+                    "initial_pose.y": ParameterValue(
+                        initial_y, value_type=float
+                    ),
+                    "initial_pose.z": 0.0,
+                    "initial_pose.yaw": ParameterValue(
+                        initial_yaw, value_type=float
+                    ),
+                },
+            ],
         ),
         Node(
             package="nav2_lifecycle_manager",
