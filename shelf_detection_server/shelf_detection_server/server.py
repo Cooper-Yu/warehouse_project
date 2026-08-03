@@ -134,6 +134,7 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("min_leg_separation", 0.25)
         self.declare_parameter("detection_timeout", 3.0)
         self.declare_parameter("staging_only", False)
+        self.declare_parameter("entry_only", False)
         self.declare_parameter("target_base_frame", "robot_base_footprint")
         self.declare_parameter("forward_speed", 0.10)
         self.declare_parameter("rotate_speed", 0.20)
@@ -265,8 +266,23 @@ class ShelfDetectionServer(Node):
             )
             return response
 
-        if bool(self.get_parameter("staging_only").value):
+        staging_only = bool(self.get_parameter("staging_only").value)
+        entry_only = bool(self.get_parameter("entry_only").value)
+        if staging_only and entry_only:
+            self._publish_stop()
+            response.complete = False
+            self.get_logger().error(
+                "complete=false: staging_only and entry_only are mutually "
+                "exclusive"
+            )
+            return response
+
+        if staging_only:
             response.complete = self._perform_staging_only(target)
+            return response
+
+        if entry_only:
+            response.complete = self._perform_entry_only(target)
             return response
 
         response.complete = self._perform_stepwise_attach(target)
@@ -300,6 +316,25 @@ class ShelfDetectionServer(Node):
             f"x={x:.3f} y={y:.3f} "
             f"shelf_normal_yaw={shelf_heading:.3f}; "
             "no shelf entry or elevator command was issued"
+        )
+        return True
+
+    def _perform_entry_only(self, initial_target: tuple) -> bool:
+        """Approach the cart center, then stop before final push or lift."""
+        complete = self._perform_stepwise_attach(
+            initial_target,
+            stop_before_final_push=True,
+            require_standoff_observation_only=True,
+        )
+        self._publish_stop()
+        if not complete:
+            self.get_logger().error(
+                "entry-only stopped before cart-center acceptance"
+            )
+            return False
+        self.get_logger().info(
+            "complete=true: entry-only cart-center accepted; "
+            "final push and elevator command were not issued"
         )
         return True
 
@@ -356,11 +391,23 @@ class ShelfDetectionServer(Node):
             return None
         return self._transform_detection_to_base(measurement)
 
-    def _perform_stepwise_attach(self, initial_target: tuple) -> bool:
+    def _perform_stepwise_attach(
+        self,
+        initial_target: tuple,
+        stop_before_final_push: bool = False,
+        require_standoff_observation_only: bool = False,
+    ) -> bool:
         deadline = time.monotonic() + float(
             self.get_parameter("movement_timeout").value
         )
-        alignment = self._align_at_safe_standoff(initial_target, deadline)
+        if require_standoff_observation_only:
+            alignment = self._verify_safe_standoff_without_motion(
+                initial_target, deadline
+            )
+        else:
+            alignment = self._align_at_safe_standoff(
+                initial_target, deadline
+            )
         if alignment is None:
             self.get_logger().error(
                 "attach stopped: safe-standoff shelf alignment failed"
@@ -511,6 +558,14 @@ class ShelfDetectionServer(Node):
             )
             return False
 
+        if stop_before_final_push:
+            self._publish_stop()
+            self.get_logger().info(
+                "entry-only boundary reached: cart-center approach "
+                "complete; stopped before final push and elevator"
+            )
+            return True
+
         final_distance = float(
             self.get_parameter("final_drive_distance").value
         )
@@ -523,6 +578,91 @@ class ShelfDetectionServer(Node):
         self._publish_stop()
         self._publish_elevator_up()
         return True
+
+    def _verify_safe_standoff_without_motion(
+        self, initial_target: tuple, deadline: float
+    ) -> Optional[tuple]:
+        """Require fresh consecutive staging acceptance without correction."""
+        target = initial_target
+        standoff = max(
+            0.0,
+            float(self.get_parameter("alignment_standoff_distance").value),
+        )
+        position_tolerance = max(
+            0.0,
+            float(self.get_parameter("alignment_position_tolerance").value),
+        )
+        yaw_tolerance = max(
+            0.0, float(self.get_parameter("yaw_tolerance").value)
+        )
+        required_samples = max(
+            1,
+            int(
+                self.get_parameter(
+                    "alignment_required_consecutive_samples"
+                ).value
+            ),
+        )
+
+        for sample in range(1, required_samples + 1):
+            if time.monotonic() >= deadline:
+                break
+            frame_id, x, y, shelf_heading = target
+            error_x, error_y = shelf_staging_error(
+                x, y, shelf_heading, standoff
+            )
+            position_error = math.hypot(error_x, error_y)
+            self.get_logger().info(
+                "entry-only standoff sample: "
+                f"consecutive={sample}/{required_samples} "
+                f"position_error={position_error:.3f} "
+                f"shelf_normal_yaw={shelf_heading:.3f}"
+            )
+            if (
+                position_error > position_tolerance
+                or not shelf_heading_aligned(
+                    shelf_heading, yaw_tolerance
+                )
+            ):
+                self._publish_stop()
+                self.get_logger().error(
+                    "entry-only rejected: fresh safe-standoff geometry "
+                    "is outside position or heading tolerance"
+                )
+                return None
+            accepted_odom_yaw = self._wait_for_stable_odom_yaw(deadline)
+            if accepted_odom_yaw is None:
+                self._publish_stop()
+                self.get_logger().error(
+                    "entry-only rejected: accepted odom yaw did not settle"
+                )
+                return None
+            if sample >= required_samples:
+                self.get_logger().info(
+                    "entry-only safe-standoff accepted without motion: "
+                    f"position_error={position_error:.3f} "
+                    f"shelf_normal_yaw={shelf_heading:.3f} "
+                    f"accepted_odom_yaw={accepted_odom_yaw:.3f}"
+                )
+                return target, accepted_odom_yaw
+
+            scan_before_observation = self._current_scan_sequence()
+            target = self._recover_cart_frame_after_motion(
+                scan_before_observation, deadline
+            )
+            if target is None:
+                self._publish_stop()
+                self.get_logger().error(
+                    "entry-only rejected: fresh safe-standoff observation "
+                    "unavailable"
+                )
+                return None
+
+        self._publish_stop()
+        self.get_logger().error(
+            "entry-only rejected before consecutive safe-standoff acceptance"
+        )
+        return None
 
     def _align_at_safe_standoff(
         self, initial_target: tuple, deadline: float

@@ -1,0 +1,33 @@
+shelf_detection_server:
+  ros__parameters:
+    use_sim_time: false
+    staging_only: false
+    entry_only: true
+    intensity_threshold: 4000.0
+    min_cluster_size: 2
+    max_x_difference: 0.75
+    min_leg_separation: 0.25
+    detection_timeout: 3.0
+    target_base_frame: robot_base_footprint
+    odom_topic: /odom
+    odom_frame: robot_odom
+
+    # Entry starts only after two fresh, motionless safe-standoff samples.
+    yaw_tolerance: 0.04
+    alignment_standoff_distance: 1.00
+    alignment_position_tolerance: 0.08
+    alignment_required_consecutive_samples: 2
+
+    # Reuse the measured simulation stepwise approach at reduced real speed.
+    forward_speed: 0.05
+    forward_step_distance: 0.15
+    center_distance_tolerance: 0.20
+    center_lateral_tolerance: 0.08
+    center_lock_distance: 0.35
+    center_lock_min_steps: 2
+    center_drive_scale: 1.0
+    entry_odom_yaw_tolerance: 0.04
+    movement_timeout: 45.0
+
+    # Unreachable in entry_only mode; retained as an explicit hard boundary.
+    final_drive_distance: 0.0
