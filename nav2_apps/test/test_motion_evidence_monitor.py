@@ -33,6 +33,10 @@ def test_phase_transitions_cover_navigation_and_shelf_events():
     assert phase == "CENTER_LOCK"
     phase = phase_from_log("published elevator-up 5 times", phase)
     assert phase == "ELEVATOR_UP"
+    phase = phase_from_log("Navigating to shipping_position: 1.98", phase)
+    assert phase == "NAV_TO_SHIPPING"
+    phase = phase_from_log("shipping_position goal succeeded", phase)
+    assert phase == "AT_SHIPPING"
 
 
 def test_unrelated_log_keeps_current_phase():

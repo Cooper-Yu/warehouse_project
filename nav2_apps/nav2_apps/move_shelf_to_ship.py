@@ -10,7 +10,11 @@ import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 
-from nav2_apps.pose_config import SIM_LOADING_POSE, optional_initial_pose
+from nav2_apps.pose_config import (
+    SIM_LOADING_POSE,
+    SIM_SHIPPING_POSE,
+    optional_initial_pose,
+)
 from nav2_apps.result_gate import ExitCode, classify_task_result
 
 
@@ -94,6 +98,26 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--footprint-timeout", type=float, default=10.0)
     parser.add_argument("--footprint-edge-tolerance", type=float, default=0.03)
+    parser.add_argument(
+        "--shipping-only",
+        action="store_true",
+        help=(
+            "After external lift/stopped confirmation, verify loaded "
+            "footprints, navigate to shipping_position, and stop."
+        ),
+    )
+    parser.add_argument(
+        "--shipping-x", type=float, default=SIM_SHIPPING_POSE[0]
+    )
+    parser.add_argument(
+        "--shipping-y", type=float, default=SIM_SHIPPING_POSE[1]
+    )
+    parser.add_argument(
+        "--shipping-yaw",
+        type=float,
+        default=SIM_SHIPPING_POSE[2],
+    )
+    parser.add_argument("--shipping-timeout", type=float, default=180.0)
     return parser
 
 
@@ -255,6 +279,82 @@ def _wait_for_external_lift_acceptance(
     return False
 
 
+def _apply_loaded_footprint_verified(
+    navigator: BasicNavigator,
+    desired: str,
+    timeout: float,
+    tolerance: float,
+) -> bool:
+    """Apply both costmap footprints through the compensating transaction."""
+    try:
+        from nav2_apps.footprint_transaction import apply_loaded_footprint
+
+        transaction = apply_loaded_footprint(
+            navigator,
+            desired,
+            timeout,
+            tolerance,
+        )
+    except (RuntimeError, TypeError, ValueError) as error:
+        navigator.get_logger().error(
+            f"loaded footprint transaction error: {error}"
+        )
+        return False
+    if not transaction.success:
+        navigator.get_logger().error(
+            "loaded footprint transaction failed: "
+            f"{transaction.reason}; "
+            f"rollback_verified={transaction.rollback_verified}"
+        )
+        return False
+    navigator.get_logger().info(
+        "loaded_footprint_verified on global and local costmaps"
+    )
+    return True
+
+
+def _navigate_to_shipping(
+    navigator: BasicNavigator,
+    shipping_pose: PoseStamped,
+    timeout: float,
+) -> ExitCode:
+    """Navigate once to shipping and expose a bounded terminal result."""
+    if timeout <= 0.0:
+        navigator.get_logger().error("shipping timeout must be positive")
+        return ExitCode.UNKNOWN
+    navigator.get_logger().info(
+        "Navigating to shipping_position: "
+        f"{shipping_pose.pose.position.x} "
+        f"{shipping_pose.pose.position.y}..."
+    )
+    if not navigator.goToPose(shipping_pose):
+        navigator.get_logger().error("shipping_position goal was rejected")
+        return ExitCode.GOAL_REJECTED
+
+    deadline = time.monotonic() + timeout
+    while not navigator.isTaskComplete():
+        if time.monotonic() >= deadline:
+            navigator.cancelTask()
+            navigator.get_logger().error(
+                "shipping_position navigation timed out; cancel requested"
+            )
+            return ExitCode.CANCELED
+        rclpy.spin_once(navigator, timeout_sec=0.1)
+
+    result = navigator.getResult()
+    exit_code = classify_task_result(result, TaskResult)
+    if exit_code != ExitCode.SUCCEEDED:
+        navigator.get_logger().error(
+            f"shipping_position goal did not succeed: {result}"
+        )
+        return exit_code
+    navigator.get_logger().info(
+        "shipping_position goal succeeded; "
+        "Slice 3A stopped at AT_SHIPPING"
+    )
+    return ExitCode.SUCCEEDED
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args, ros_args = _parser().parse_known_args(argv)
     try:
@@ -266,6 +366,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     rclpy.init(args=ros_args)
     navigator = BasicNavigator()
     try:
+        operation_modes = (
+            args.detection_only,
+            args.approach_and_elevator,
+            args.loaded_footprint_only,
+            args.shipping_only,
+        )
+        if sum(bool(mode) for mode in operation_modes) > 1:
+            navigator.get_logger().error(
+                "detection, attach, footprint-only, and shipping-only "
+                "modes are mutually exclusive"
+            )
+            return int(ExitCode.UNKNOWN)
+
         if args.loaded_footprint_only:
             if not (
                 args.confirm_lift_accepted and args.confirm_robot_stopped
@@ -275,34 +388,65 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "stopped-state confirmations"
                 )
                 return int(ExitCode.UNKNOWN)
-            try:
-                from nav2_apps.footprint_transaction import (
-                    apply_loaded_footprint,
-                )
-
-                transaction = apply_loaded_footprint(
-                    navigator,
-                    args.loaded_footprint,
-                    args.footprint_timeout,
-                    args.footprint_edge_tolerance,
-                )
-            except (RuntimeError, TypeError, ValueError) as error:
-                navigator.get_logger().error(
-                    f"loaded footprint transaction error: {error}"
-                )
-                return int(ExitCode.UNKNOWN)
-            if not transaction.success:
-                navigator.get_logger().error(
-                    "loaded footprint transaction failed: "
-                    f"{transaction.reason}; "
-                    f"rollback_verified={transaction.rollback_verified}"
-                )
+            if not _apply_loaded_footprint_verified(
+                navigator,
+                args.loaded_footprint,
+                args.footprint_timeout,
+                args.footprint_edge_tolerance,
+            ):
                 return int(ExitCode.UNKNOWN)
             navigator.get_logger().info(
-                "loaded_footprint_verified on global and local costmaps; "
                 "Slice stopped before shipping navigation"
             )
             return int(ExitCode.SUCCEEDED)
+
+        if args.shipping_only:
+            if not (
+                args.confirm_lift_accepted and args.confirm_robot_stopped
+            ):
+                navigator.get_logger().error(
+                    "shipping-only requires explicit lift and stopped-state "
+                    "confirmations"
+                )
+                return int(ExitCode.UNKNOWN)
+            if initial_pose is not None:
+                navigator.get_logger().error(
+                    "shipping-only requires existing AMCL localization; "
+                    "initial pose override is not allowed"
+                )
+                return int(ExitCode.UNKNOWN)
+            if not _wait_for_existing_localization(
+                navigator,
+                args.localization_timeout,
+            ):
+                navigator.get_logger().error(
+                    "No existing AMCL pose received before localization "
+                    "timeout"
+                )
+                return int(ExitCode.UNKNOWN)
+
+            navigator.waitUntilNav2Active()
+            if not _apply_loaded_footprint_verified(
+                navigator,
+                args.loaded_footprint,
+                args.footprint_timeout,
+                args.footprint_edge_tolerance,
+            ):
+                return int(ExitCode.UNKNOWN)
+            shipping_pose = _pose(
+                navigator,
+                args.frame_id,
+                args.shipping_x,
+                args.shipping_y,
+                args.shipping_yaw,
+            )
+            return int(
+                _navigate_to_shipping(
+                    navigator,
+                    shipping_pose,
+                    args.shipping_timeout,
+                )
+            )
 
         if initial_pose is not None:
             navigator.setInitialPose(
