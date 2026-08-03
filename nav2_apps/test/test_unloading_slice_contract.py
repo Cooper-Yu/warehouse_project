@@ -84,6 +84,47 @@ def test_lower_only_publishes_bounded_down_commands(monkeypatch):
     )
 
 
+def test_shipping_relift_publishes_bounded_up_commands(monkeypatch):
+    navigator = FakeNavigator()
+    times = iter([10.0, 10.0, 11.0])
+    monkeypatch.setattr(
+        move_shelf_to_ship.time,
+        "monotonic",
+        lambda: next(times),
+    )
+    monkeypatch.setattr(move_shelf_to_ship.rclpy, "ok", lambda: True)
+    monkeypatch.setattr(
+        move_shelf_to_ship.rclpy,
+        "spin_once",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = move_shelf_to_ship._publish_elevator_up_and_wait(
+        navigator,
+        "/elevator_up",
+        5,
+        0.0,
+        0.5,
+    )
+
+    assert result
+    assert navigator.publisher.messages == ["up"] * 5
+    assert navigator.destroyed
+
+
+def test_forward_progress_uses_starting_local_positive_x_axis():
+    forward, lateral = move_shelf_to_ship._forward_progress(
+        2.0,
+        3.0,
+        math.pi / 2.0,
+        2.0,
+        3.16,
+    )
+
+    assert abs(forward - 0.16) < 1e-9
+    assert abs(lateral) < 1e-9
+
+
 def test_clearance_gate_requires_fresh_transform_and_minimum_x():
     low = SimpleNamespace(
         transform=SimpleNamespace(
@@ -126,18 +167,31 @@ def test_exit_restore_defaults_match_reviewed_simulation_plan():
     assert args.clearance_x == 0.36
 
 
+def test_shipping_refinement_defaults_match_visual_gap():
+    args = move_shelf_to_ship._parser().parse_args(
+        ["--shipping-forward-refine-only"]
+    )
+
+    assert args.shipping_refine_distance == 0.16
+    assert args.shipping_refine_speed == 0.05
+    assert args.shipping_refine_timeout == 15.0
+
+
 def test_unloading_modes_are_separate_and_stop_before_return():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
     assert "--lower-only" in source
     assert "--exit-restore-only" in source
+    assert "--shipping-relift-only" in source
+    assert "--shipping-forward-refine-only" in source
     assert "lower_acceptance_pending" in source
     assert "EXIT_ACCEPTANCE_PENDING" in source
     assert "UNLOADED_FOOTPRINT_VERIFIED" in source
     assert "confirm_shelf_lowered" in source
     assert "CLEAR_OF_SHELF" in source
     assert "return navigation" in source
+    assert "PLACEMENT_ACCEPTANCE_PENDING" in source
     assert any(
         isinstance(node, ast.UnaryOp)
         and isinstance(node.op, ast.USub)

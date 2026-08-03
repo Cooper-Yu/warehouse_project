@@ -179,6 +179,29 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--elevator-down-count", type=int, default=5)
     parser.add_argument("--elevator-down-interval", type=float, default=0.1)
     parser.add_argument("--elevator-down-wait", type=float, default=8.0)
+    parser.add_argument(
+        "--shipping-relift-only",
+        action="store_true",
+        help=(
+            "From a stopped lowered shipping state, publish bounded "
+            "elevator-up commands and stop for external acceptance."
+        ),
+    )
+    parser.add_argument(
+        "--shipping-forward-refine-only",
+        action="store_true",
+        help=(
+            "After external re-lift acceptance, move the loaded assembly "
+            "forward by a bounded odom distance and stop."
+        ),
+    )
+    parser.add_argument("--elevator-up-topic", default="/elevator_up")
+    parser.add_argument("--elevator-up-count", type=int, default=5)
+    parser.add_argument("--elevator-up-interval", type=float, default=0.1)
+    parser.add_argument("--elevator-up-wait", type=float, default=8.0)
+    parser.add_argument("--shipping-refine-distance", type=float, default=0.16)
+    parser.add_argument("--shipping-refine-speed", type=float, default=0.05)
+    parser.add_argument("--shipping-refine-timeout", type=float, default=15.0)
     parser.add_argument("--cmd-vel-topic", default="/cmd_vel")
     parser.add_argument("--odom-frame", default="odom")
     parser.add_argument("--exit-distance", type=float, default=0.75)
@@ -423,6 +446,44 @@ def _publish_elevator_down_and_wait(
     return True
 
 
+def _publish_elevator_up_and_wait(
+    navigator: BasicNavigator,
+    topic: str,
+    count: int,
+    interval: float,
+    wait_seconds: float,
+) -> bool:
+    """Publish bounded lift commands without claiming completion."""
+    if count <= 0 or interval < 0.0 or wait_seconds <= 0.0:
+        navigator.get_logger().error(
+            "elevator-up count/wait must be positive and interval must be "
+            "non-negative"
+        )
+        return False
+    publisher = navigator.create_publisher(String, topic, 10)
+    message = String()
+    message.data = "up"
+    try:
+        for _ in range(count):
+            publisher.publish(message)
+            if interval > 0.0:
+                time.sleep(interval)
+        navigator.get_logger().warning(
+            f"published elevator-up {count} times; no programmatic "
+            "completion feedback is available"
+        )
+        deadline = time.monotonic() + wait_seconds
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.1)
+    finally:
+        navigator.destroy_publisher(publisher)
+    navigator.get_logger().warning(
+        "elevator-up bounded wait ended; external side-view acceptance is "
+        "required before loaded forward refinement"
+    )
+    return True
+
+
 def _normalize_angle(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
 
@@ -609,6 +670,145 @@ def _exit_progress(
     reverse = -(dx * math.cos(start_yaw) + dy * math.sin(start_yaw))
     lateral = -dx * math.sin(start_yaw) + dy * math.cos(start_yaw)
     return reverse, lateral
+
+
+def _forward_progress(
+    start_x: float,
+    start_y: float,
+    start_yaw: float,
+    current_x: float,
+    current_y: float,
+):
+    """Project odom displacement onto the starting forward/lateral axes."""
+    dx = current_x - start_x
+    dy = current_y - start_y
+    forward = dx * math.cos(start_yaw) + dy * math.sin(start_yaw)
+    lateral = -dx * math.sin(start_yaw) + dy * math.cos(start_yaw)
+    return forward, lateral
+
+
+def _bounded_forward_by_odom(
+    navigator: BasicNavigator,
+    cmd_vel_topic: str,
+    odom_frame: str,
+    base_frame: str,
+    distance: float,
+    speed: float,
+    timeout: float,
+    lookup_timeout: float,
+    heading_tolerance: float,
+    lateral_tolerance: float,
+) -> bool:
+    """Move a measured local-x distance with heading/lateral guards."""
+    import tf2_ros
+
+    if (
+        distance <= 0.0
+        or speed <= 0.0
+        or timeout <= 0.0
+        or lookup_timeout <= 0.0
+        or heading_tolerance < 0.0
+        or lateral_tolerance < 0.0
+    ):
+        navigator.get_logger().error("invalid bounded-refinement parameters")
+        return False
+
+    publisher = navigator.create_publisher(Twist, cmd_vel_topic, 10)
+    buffer = tf2_ros.Buffer()
+    listener = tf2_ros.TransformListener(buffer, navigator, spin_thread=False)
+    deadline = time.monotonic() + timeout
+
+    def lookup():
+        try:
+            return buffer.lookup_transform(
+                odom_frame, base_frame, rclpy.time.Time()
+            )
+        except tf2_ros.TransformException:
+            return None
+
+    start = None
+    try:
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            start = lookup()
+            if start is not None:
+                break
+        if start is None:
+            navigator.get_logger().error(
+                "shipping forward refinement rejected: odom TF unavailable"
+            )
+            return False
+
+        start_x = start.transform.translation.x
+        start_y = start.transform.translation.y
+        start_yaw = _yaw_from_rotation(start.transform.rotation)
+        command = Twist()
+        command.linear.x = speed
+        last_tf_time = time.monotonic()
+        forward_progress = 0.0
+        lateral = 0.0
+        navigator.get_logger().info(
+            "bounded shipping forward refinement started: "
+            f"target_distance={distance:.3f} speed={speed:.3f} "
+            f"accepted_odom_yaw={start_yaw:.3f}"
+        )
+
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            current = lookup()
+            if current is None:
+                if time.monotonic() - last_tf_time >= lookup_timeout:
+                    navigator.get_logger().error(
+                        "shipping forward refinement stopped: odom TF stale"
+                    )
+                    return False
+                publisher.publish(command)
+                continue
+
+            last_tf_time = time.monotonic()
+            forward_progress, lateral = _forward_progress(
+                start_x,
+                start_y,
+                start_yaw,
+                current.transform.translation.x,
+                current.transform.translation.y,
+            )
+            current_yaw = _yaw_from_rotation(current.transform.rotation)
+            heading_drift = _normalize_angle(current_yaw - start_yaw)
+            if abs(heading_drift) > heading_tolerance:
+                navigator.get_logger().error(
+                    "shipping forward refinement stopped: heading drift "
+                    f"{heading_drift:.3f} exceeds {heading_tolerance:.3f}"
+                )
+                return False
+            if abs(lateral) > lateral_tolerance:
+                navigator.get_logger().error(
+                    "shipping forward refinement stopped: lateral drift "
+                    f"{lateral:.3f} exceeds {lateral_tolerance:.3f}"
+                )
+                return False
+            if forward_progress >= distance:
+                navigator.get_logger().info(
+                    "bounded shipping forward refinement complete: "
+                    f"target={distance:.3f} progress={forward_progress:.3f} "
+                    f"lateral={lateral:.3f} "
+                    f"heading_drift={heading_drift:.3f}"
+                )
+                return True
+            publisher.publish(command)
+
+        navigator.get_logger().error(
+            "shipping forward refinement timed out before odom target: "
+            f"target={distance:.3f} progress={forward_progress:.3f}"
+        )
+        return False
+    finally:
+        stop = Twist()
+        for _ in range(3):
+            publisher.publish(stop)
+            time.sleep(0.05)
+        navigator.destroy_publisher(publisher)
+        del listener
 
 
 def _bounded_reverse_by_odom(
@@ -1058,13 +1258,108 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.shipping_alignment_only,
             args.lower_only,
             args.exit_restore_only,
+            args.shipping_relift_only,
+            args.shipping_forward_refine_only,
             args.return_only,
         )
         if sum(bool(mode) for mode in operation_modes) > 1:
             navigator.get_logger().error(
                 "detection, attach, footprint, shipping, alignment, lower, "
-                "exit, and return "
+                "exit, re-lift, refine, and return "
                 "modes are mutually exclusive"
+            )
+            return int(ExitCode.UNKNOWN)
+
+        if args.shipping_relift_only:
+            if not (
+                args.confirm_at_shipping
+                and args.confirm_shelf_lowered
+                and args.confirm_robot_stopped
+            ):
+                navigator.get_logger().error(
+                    "shipping-relift-only requires explicit at-shipping, "
+                    "shelf-lowered, and stopped-state confirmations"
+                )
+                return int(ExitCode.UNKNOWN)
+            if initial_pose is not None:
+                navigator.get_logger().error(
+                    "shipping-relift-only does not allow an initial pose "
+                    "override"
+                )
+                return int(ExitCode.UNKNOWN)
+            if not _apply_loaded_footprint_verified(
+                navigator,
+                args.loaded_footprint,
+                args.footprint_timeout,
+                args.footprint_edge_tolerance,
+            ):
+                return int(ExitCode.UNKNOWN)
+            if not _publish_elevator_up_and_wait(
+                navigator,
+                args.elevator_up_topic,
+                args.elevator_up_count,
+                args.elevator_up_interval,
+                args.elevator_up_wait,
+            ):
+                return int(ExitCode.UNKNOWN)
+            navigator.get_logger().warning(
+                "shipping re-lift stopped at lift_acceptance_pending; no "
+                "forward command was published"
+            )
+            return int(ExitCode.UNKNOWN)
+
+        if args.shipping_forward_refine_only:
+            if not (
+                args.confirm_at_shipping
+                and args.confirm_lift_accepted
+                and args.confirm_robot_stopped
+            ):
+                navigator.get_logger().error(
+                    "shipping-forward-refine-only requires explicit "
+                    "at-shipping, re-lift-accepted, and stopped-state "
+                    "confirmations"
+                )
+                return int(ExitCode.UNKNOWN)
+            if initial_pose is not None:
+                navigator.get_logger().error(
+                    "shipping-forward-refine-only does not allow an initial "
+                    "pose override"
+                )
+                return int(ExitCode.UNKNOWN)
+            if not _apply_loaded_footprint_verified(
+                navigator,
+                args.loaded_footprint,
+                args.footprint_timeout,
+                args.footprint_edge_tolerance,
+            ):
+                return int(ExitCode.UNKNOWN)
+            if not _bounded_forward_by_odom(
+                navigator,
+                args.cmd_vel_topic,
+                args.odom_frame,
+                args.base_frame,
+                args.shipping_refine_distance,
+                args.shipping_refine_speed,
+                args.shipping_refine_timeout,
+                args.odom_lookup_timeout,
+                args.exit_heading_tolerance,
+                args.exit_lateral_tolerance,
+            ):
+                navigator.get_logger().error(
+                    "shipping forward refinement stopped at "
+                    "PLACEMENT_ACCEPTANCE_PENDING; loaded footprint retained"
+                )
+                return int(ExitCode.UNKNOWN)
+            if not _settle_without_motion(navigator, args.exit_settle):
+                navigator.get_logger().error(
+                    "shipping forward refinement settle failed; loaded "
+                    "footprint retained"
+                )
+                return int(ExitCode.UNKNOWN)
+            navigator.get_logger().warning(
+                "shipping forward refinement stopped at "
+                "PLACEMENT_ACCEPTANCE_PENDING; external boundary visual "
+                "acceptance is required before lowering"
             )
             return int(ExitCode.UNKNOWN)
 
