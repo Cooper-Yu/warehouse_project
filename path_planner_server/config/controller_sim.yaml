@@ -18,8 +18,10 @@ controller_server:
     general_goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
       stateful: true
-      xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
+      # Keep the loaded shelf close to the accepted shipping pose and normal
+      # to the wall before the mission is allowed to continue.
+      xy_goal_tolerance: 0.10
+      yaw_goal_tolerance: 0.10
 
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
@@ -45,7 +47,7 @@ controller_server:
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
-      xy_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.10
       trans_stopped_velocity: 0.1
       short_circuit_trajectory_evaluation: true
       stateful: true

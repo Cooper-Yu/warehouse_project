@@ -45,9 +45,9 @@ Visualization Manager:
         Durability Policy: Transient Local
         Reliability Policy: Reliable
         Value: /map
-    - Alpha: 0.45
+    - Alpha: 0.7
       Class: rviz_default_plugins/Map
-      Color Scheme: map
+      Color Scheme: costmap
       Enabled: true
       Name: Keepout Mask
       Topic:
@@ -95,7 +95,7 @@ Visualization Manager:
       Enabled: true
       Name: RobotModel
       Visual Enabled: true
-    - Alpha: 0.35
+    - Alpha: 0.55
       Class: rviz_default_plugins/Map
       Color Scheme: costmap
       Enabled: true
