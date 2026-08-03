@@ -31,9 +31,27 @@ def test_real_profile_is_low_speed_and_hard_gated():
     assert profile["target_base_frame"] == "robot_base_footprint"
     assert profile["forward_speed"] <= 0.05
     assert profile["rotate_speed"] <= 0.10
+    assert profile["yaw_tolerance"] == 0.04
     assert profile["alignment_max_drive_distance"] <= 0.40
     assert profile["alignment_max_travel_yaw"] <= 0.70
     assert profile["final_drive_distance"] == 0.0
+
+
+def test_real_heading_tolerance_override_does_not_change_server_default():
+    source = SERVER_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    declared = {
+        node.args[0].value: node.args[1].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "declare_parameter"
+        and len(node.args) >= 2
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[1], ast.Constant)
+    }
+
+    assert declared["yaw_tolerance"] == 0.03
 
 
 def test_staging_only_path_cannot_enter_or_publish_elevator():
