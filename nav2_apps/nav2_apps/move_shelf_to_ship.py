@@ -1254,6 +1254,173 @@ def _navigate_to_init(
     return ExitCode.SUCCEEDED
 
 
+def _exit_restore_integrated(
+    navigator: BasicNavigator,
+    args: argparse.Namespace,
+) -> bool:
+    """Exit the shelf, refine clearance once if needed, then restore shape."""
+    if not _bounded_reverse_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        args.exit_distance,
+        args.exit_speed,
+        args.exit_timeout,
+        args.odom_lookup_timeout,
+        args.exit_heading_tolerance,
+        args.exit_lateral_tolerance,
+    ):
+        return False
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
+
+    transform = _request_shelf_transform(
+        navigator,
+        args.shelf_service,
+        args.cart_frame,
+        args.base_frame,
+        args.clearance_timeout,
+    )
+    if transform is None:
+        navigator.get_logger().error(
+            "integrated mission stopped at EXIT_ACCEPTANCE_PENDING: fresh "
+            "shelf clearance is unavailable; loaded footprint retained"
+        )
+        return False
+    if not _clearance_passes(transform, args.clearance_x):
+        navigator.get_logger().warning(
+            "main exit clearance is below the acceptance threshold; "
+            "running one bounded clearance refinement"
+        )
+        if not _bounded_reverse_by_odom(
+            navigator,
+            args.cmd_vel_topic,
+            args.odom_frame,
+            args.base_frame,
+            args.clearance_refine_distance,
+            args.clearance_refine_speed,
+            args.clearance_refine_motion_timeout,
+            args.odom_lookup_timeout,
+            args.exit_heading_tolerance,
+            args.exit_lateral_tolerance,
+        ):
+            return False
+        if not _settle_without_motion(navigator, args.exit_settle):
+            return False
+        transform = _request_shelf_transform(
+            navigator,
+            args.shelf_service,
+            args.cart_frame,
+            args.base_frame,
+            args.clearance_timeout,
+        )
+    if not _clearance_passes(transform, args.clearance_x):
+        observed = (
+            "unavailable"
+            if transform is None
+            else f"{transform.transform.translation.x:.3f}"
+        )
+        navigator.get_logger().error(
+            "integrated mission stopped at EXIT_ACCEPTANCE_PENDING: fresh "
+            f"cart_frame.x={observed}, required>={args.clearance_x:.3f}; "
+            "loaded footprint retained"
+        )
+        return False
+
+    navigator.get_logger().info("CLEAR_OF_SHELF")
+    return _apply_unloaded_footprint_verified(
+        navigator,
+        args.unloaded_footprint,
+        args.footprint_timeout,
+        args.footprint_edge_tolerance,
+    )
+
+
+def _run_integrated_mission(
+    navigator: BasicNavigator,
+    args: argparse.Namespace,
+) -> ExitCode:
+    """Run the validated post-loading route as one fail-closed mission."""
+    navigator.get_logger().info(
+        "integrated mission: attach -> shipping -> lower -> exit -> return"
+    )
+    if not _request_stepwise_attach(
+        navigator, args.shelf_service, args.attach_timeout
+    ):
+        return ExitCode.UNKNOWN
+    if not _settle_without_motion(navigator, args.elevator_wait):
+        return ExitCode.UNKNOWN
+    if not _apply_loaded_footprint_verified(
+        navigator,
+        args.loaded_footprint,
+        args.footprint_timeout,
+        args.footprint_edge_tolerance,
+    ):
+        return ExitCode.UNKNOWN
+
+    shipping_pose = _pose(
+        navigator,
+        args.frame_id,
+        args.shipping_x,
+        args.shipping_y,
+        args.shipping_yaw,
+    )
+    shipping_result = _navigate_to_shipping(
+        navigator,
+        shipping_pose,
+        args.shipping_timeout,
+        args.base_frame,
+        args.shipping_position_tolerance,
+        args.shipping_yaw_tolerance,
+        args.shipping_max_yaw_correction,
+        args.shipping_alignment_timeout,
+        args.shipping_alignment_settle,
+        args.shipping_pose_lookup_timeout,
+        args.shipping_yaw_correction_ratio,
+        args.shipping_yaw_correction_rounds,
+    )
+    if shipping_result != ExitCode.SUCCEEDED:
+        return shipping_result
+
+    if not _bounded_forward_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        args.shipping_refine_distance,
+        args.shipping_refine_speed,
+        args.shipping_refine_timeout,
+        args.odom_lookup_timeout,
+        args.exit_heading_tolerance,
+        args.exit_lateral_tolerance,
+    ):
+        return ExitCode.UNKNOWN
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return ExitCode.UNKNOWN
+    navigator.get_logger().info("SHIPPING_PLACEMENT_REFINED")
+
+    if not _publish_elevator_down_and_wait(
+        navigator,
+        args.elevator_down_topic,
+        args.elevator_down_count,
+        args.elevator_down_interval,
+        args.elevator_down_wait,
+    ):
+        return ExitCode.UNKNOWN
+    if not _exit_restore_integrated(navigator, args):
+        return ExitCode.UNKNOWN
+
+    init_pose = _pose(
+        navigator,
+        args.frame_id,
+        args.return_x,
+        args.return_y,
+        args.return_yaw,
+    )
+    return _navigate_to_init(navigator, init_pose, args.return_timeout)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = _parse_application_args(argv)
     try:
@@ -1278,6 +1445,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.shipping_forward_refine_only,
             args.return_only,
         )
+        integrated_mode = not any(operation_modes)
         if sum(bool(mode) for mode in operation_modes) > 1:
             navigator.get_logger().error(
                 "detection, attach, footprint, shipping, alignment, lower, "
@@ -1768,6 +1936,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
             )
 
+        if integrated_mode and initial_pose is None:
+            initial_pose = SIM_INIT_POSE
+            navigator.get_logger().info(
+                "integrated simulation mission will initialize AMCL at "
+                "init_position=(0,0,0)"
+            )
+
         if initial_pose is not None:
             navigator.setInitialPose(
                 _pose(navigator, args.frame_id, *initial_pose)
@@ -1806,6 +1981,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return int(exit_code)
 
         navigator.get_logger().info("loading_position goal succeeded")
+        if integrated_mode:
+            return int(_run_integrated_mission(navigator, args))
         if not args.detection_only and not args.approach_and_elevator:
             return int(exit_code)
         if args.detection_only:

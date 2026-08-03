@@ -188,6 +188,20 @@ def generate_launch_description():
             *_navigation_nodes(IfCondition(use_sim_time), use_sim_time, sim_files),
             *_navigation_nodes(UnlessCondition(use_sim_time), use_sim_time, real_files),
             Node(
+                package="shelf_detection_server",
+                executable="shelf_detection_server",
+                name="shelf_detection_server",
+                output="screen",
+                condition=IfCondition(use_sim_time),
+                parameters=[
+                    {
+                        "use_sim_time": ParameterValue(
+                            use_sim_time, value_type=bool
+                        )
+                    }
+                ],
+            ),
+            Node(
                 package="rviz2",
                 executable="rviz2",
                 name="rviz2_navigation",

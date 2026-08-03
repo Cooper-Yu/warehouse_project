@@ -1,0 +1,101 @@
+import ast
+from pathlib import Path
+
+from nav2_apps import move_shelf_to_ship
+
+
+SOURCE_PATH = (
+    Path(__file__).parents[1]
+    / "nav2_apps"
+    / "move_shelf_to_ship.py"
+)
+
+
+def _function(tree, name):
+    return next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+
+def test_no_mission_flags_selects_integrated_course_route():
+    args = move_shelf_to_ship._parser().parse_args([])
+
+    operation_modes = (
+        args.detection_only,
+        args.approach_and_elevator,
+        args.loaded_footprint_only,
+        args.shipping_only,
+        args.shipping_alignment_only,
+        args.lower_only,
+        args.exit_restore_only,
+        args.exit_clearance_refine_only,
+        args.shipping_relift_only,
+        args.shipping_forward_refine_only,
+        args.return_only,
+    )
+
+    assert not any(operation_modes)
+    assert args.shipping_refine_distance == 0.16
+    assert args.exit_distance == 0.75
+    assert args.clearance_refine_distance == 0.02
+    assert args.clearance_x == 0.36
+
+
+def test_integrated_route_contains_complete_fail_closed_sequence():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    mission = _function(tree, "_run_integrated_mission")
+    mission_source = ast.get_source_segment(source, mission)
+
+    expected_calls = [
+        "_request_stepwise_attach",
+        "_apply_loaded_footprint_verified",
+        "_navigate_to_shipping",
+        "_bounded_forward_by_odom",
+        "_publish_elevator_down_and_wait",
+        "_exit_restore_integrated",
+        "_navigate_to_init",
+    ]
+    positions = [mission_source.index(call) for call in expected_calls]
+
+    assert positions == sorted(positions)
+    assert "SIM_INIT_POSE" in source
+    assert "integrated_mode = not any(operation_modes)" in source
+
+
+def test_integrated_exit_allows_only_one_clearance_refinement():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    exit_flow = _function(tree, "_exit_restore_integrated")
+    exit_source = ast.get_source_segment(source, exit_flow)
+
+    assert exit_source.count("_bounded_reverse_by_odom") == 2
+    assert exit_source.count("_request_shelf_transform") == 2
+    assert "if transform is None" in exit_source
+    assert "_apply_unloaded_footprint_verified" in exit_source
+    assert "EXIT_ACCEPTANCE_PENDING" in exit_source
+
+
+def test_course_script_delegates_to_installed_integrated_main():
+    script = (
+        Path(__file__).parents[1] / "scripts" / "move_shelf_to_ship.py"
+    ).read_text(encoding="utf-8")
+
+    assert "from nav2_apps.move_shelf_to_ship import main" in script
+    assert "main()" in script
+
+
+def test_pathplanner_launch_owns_simulation_shelf_server():
+    repository = Path(__file__).parents[2]
+    launch_source = (
+        repository
+        / "path_planner_server"
+        / "launch"
+        / "pathplanner.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'package="shelf_detection_server"' in launch_source
+    assert 'executable="shelf_detection_server"' in launch_source
+    assert "condition=IfCondition(use_sim_time)" in launch_source
