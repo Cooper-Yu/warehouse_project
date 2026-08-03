@@ -173,6 +173,15 @@ def _parser() -> argparse.ArgumentParser:
             "verify shelf clearance, and restore unloaded footprints."
         ),
     )
+    parser.add_argument(
+        "--exit-clearance-refine-only",
+        action="store_true",
+        help=(
+            "After the main shelf exit completed but fresh clearance was "
+            "slightly short, reverse a small bounded distance, recheck, "
+            "and conditionally restore unloaded footprints."
+        ),
+    )
     parser.add_argument("--confirm-at-shipping", action="store_true")
     parser.add_argument("--confirm-shelf-lowered", action="store_true")
     parser.add_argument("--elevator-down-topic", default="/elevator_down")
@@ -207,6 +216,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--exit-distance", type=float, default=0.75)
     parser.add_argument("--exit-speed", type=float, default=0.05)
     parser.add_argument("--exit-timeout", type=float, default=40.0)
+    parser.add_argument("--clearance-refine-distance", type=float, default=0.02)
+    parser.add_argument("--clearance-refine-speed", type=float, default=0.03)
+    parser.add_argument("--clearance-refine-motion-timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--confirm-exit-distance-complete", action="store_true"
+    )
     parser.add_argument("--exit-heading-tolerance", type=float, default=0.03)
     parser.add_argument("--exit-lateral-tolerance", type=float, default=0.10)
     parser.add_argument("--odom-lookup-timeout", type=float, default=1.0)
@@ -1258,6 +1273,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.shipping_alignment_only,
             args.lower_only,
             args.exit_restore_only,
+            args.exit_clearance_refine_only,
             args.shipping_relift_only,
             args.shipping_forward_refine_only,
             args.return_only,
@@ -1265,7 +1281,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if sum(bool(mode) for mode in operation_modes) > 1:
             navigator.get_logger().error(
                 "detection, attach, footprint, shipping, alignment, lower, "
-                "exit, re-lift, refine, and return "
+                "exit, clearance-refine, re-lift, refine, and return "
                 "modes are mutually exclusive"
             )
             return int(ExitCode.UNKNOWN)
@@ -1479,6 +1495,92 @@ def main(argv: Optional[List[str]] = None) -> int:
             navigator.get_logger().info(
                 "Slice 3B2 stopped at UNLOADED_FOOTPRINT_VERIFIED before "
                 "return navigation"
+            )
+            return int(ExitCode.SUCCEEDED)
+
+        if args.exit_clearance_refine_only:
+            if not (
+                args.confirm_at_shipping
+                and args.confirm_shelf_lowered
+                and args.confirm_robot_stopped
+                and args.confirm_exit_distance_complete
+            ):
+                navigator.get_logger().error(
+                    "exit-clearance-refine-only requires explicit "
+                    "at-shipping, shelf-lowered, stopped-state, and "
+                    "main-exit-distance-complete confirmations"
+                )
+                return int(ExitCode.UNKNOWN)
+            if initial_pose is not None:
+                navigator.get_logger().error(
+                    "exit-clearance-refine-only does not allow an initial "
+                    "pose override"
+                )
+                return int(ExitCode.UNKNOWN)
+            if not _apply_loaded_footprint_verified(
+                navigator,
+                args.loaded_footprint,
+                args.footprint_timeout,
+                args.footprint_edge_tolerance,
+            ):
+                return int(ExitCode.UNKNOWN)
+            if not _bounded_reverse_by_odom(
+                navigator,
+                args.cmd_vel_topic,
+                args.odom_frame,
+                args.base_frame,
+                args.clearance_refine_distance,
+                args.clearance_refine_speed,
+                args.clearance_refine_motion_timeout,
+                args.odom_lookup_timeout,
+                args.exit_heading_tolerance,
+                args.exit_lateral_tolerance,
+            ):
+                navigator.get_logger().error(
+                    "clearance refinement stopped at "
+                    "EXIT_ACCEPTANCE_PENDING; loaded footprint retained"
+                )
+                return int(ExitCode.UNKNOWN)
+            if not _settle_without_motion(navigator, args.exit_settle):
+                navigator.get_logger().error(
+                    "clearance refinement settle failed; loaded footprint "
+                    "retained"
+                )
+                return int(ExitCode.UNKNOWN)
+            transform = _request_shelf_transform(
+                navigator,
+                args.shelf_service,
+                args.cart_frame,
+                args.base_frame,
+                args.clearance_timeout,
+            )
+            if not _clearance_passes(transform, args.clearance_x):
+                observed = (
+                    "unavailable"
+                    if transform is None
+                    else f"{transform.transform.translation.x:.3f}"
+                )
+                navigator.get_logger().error(
+                    "clearance refinement stopped at "
+                    "EXIT_ACCEPTANCE_PENDING: fresh "
+                    f"cart_frame.x={observed}, required>="
+                    f"{args.clearance_x:.3f}; loaded footprint retained"
+                )
+                return int(ExitCode.UNKNOWN)
+            navigator.get_logger().info(
+                "CLEAR_OF_SHELF verified after bounded clearance "
+                "refinement, stop/settle, and fresh shelf geometry"
+            )
+            if not _apply_unloaded_footprint_verified(
+                navigator,
+                args.unloaded_footprint,
+                args.footprint_timeout,
+                args.footprint_edge_tolerance,
+            ):
+                return int(ExitCode.UNKNOWN)
+            navigator.get_logger().info(
+                "clearance refinement stopped at "
+                "UNLOADED_FOOTPRINT_VERIFIED before return navigation"
             )
             return int(ExitCode.SUCCEEDED)
 

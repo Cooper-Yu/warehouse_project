@@ -177,12 +177,24 @@ def test_shipping_refinement_defaults_match_visual_gap():
     assert args.shipping_refine_timeout == 15.0
 
 
+def test_clearance_refinement_defaults_match_two_mm_shortfall():
+    args = move_shelf_to_ship._parser().parse_args(
+        ["--exit-clearance-refine-only"]
+    )
+
+    assert args.clearance_refine_distance == 0.02
+    assert args.clearance_refine_speed == 0.03
+    assert args.clearance_refine_motion_timeout == 10.0
+    assert not args.confirm_exit_distance_complete
+
+
 def test_unloading_modes_are_separate_and_stop_before_return():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
     assert "--lower-only" in source
     assert "--exit-restore-only" in source
+    assert "--exit-clearance-refine-only" in source
     assert "--shipping-relift-only" in source
     assert "--shipping-forward-refine-only" in source
     assert "lower_acceptance_pending" in source
@@ -192,6 +204,9 @@ def test_unloading_modes_are_separate_and_stop_before_return():
     assert "CLEAR_OF_SHELF" in source
     assert "return navigation" in source
     assert "PLACEMENT_ACCEPTANCE_PENDING" in source
+    assert "confirm_exit_distance_complete" in source
+    assert "clearance refinement stopped" in source
+    assert "_bounded_reverse_by_odom" in source
     assert any(
         isinstance(node, ast.UnaryOp)
         and isinstance(node.op, ast.USub)
