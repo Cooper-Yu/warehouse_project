@@ -133,6 +133,7 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("max_x_difference", 0.75)
         self.declare_parameter("min_leg_separation", 0.25)
         self.declare_parameter("detection_timeout", 3.0)
+        self.declare_parameter("staging_only", False)
         self.declare_parameter("target_base_frame", "robot_base_footprint")
         self.declare_parameter("forward_speed", 0.10)
         self.declare_parameter("rotate_speed", 0.20)
@@ -264,6 +265,10 @@ class ShelfDetectionServer(Node):
             )
             return response
 
+        if bool(self.get_parameter("staging_only").value):
+            response.complete = self._perform_staging_only(target)
+            return response
+
         response.complete = self._perform_stepwise_attach(target)
         if response.complete:
             self.get_logger().info(
@@ -273,6 +278,30 @@ class ShelfDetectionServer(Node):
             self._publish_stop()
             self.get_logger().error("complete=false: stepwise attach failed")
         return response
+
+    def _perform_staging_only(self, initial_target: tuple) -> bool:
+        """Align at safe standoff, then stop before entry or elevator."""
+        deadline = time.monotonic() + float(
+            self.get_parameter("movement_timeout").value
+        )
+        alignment = self._align_at_safe_standoff(initial_target, deadline)
+        self._publish_stop()
+        if alignment is None:
+            self.get_logger().error(
+                "staging-only stopped: safe-standoff alignment failed"
+            )
+            return False
+
+        target, _accepted_odom_yaw = alignment
+        frame_id, x, y, shelf_heading = target
+        self._publish_cart_frame(frame_id, x, y)
+        self.get_logger().info(
+            "complete=true: staging-only safe-standoff accepted; "
+            f"x={x:.3f} y={y:.3f} "
+            f"shelf_normal_yaw={shelf_heading:.3f}; "
+            "no shelf entry or elevator command was issued"
+        )
+        return True
 
     def _wait_for_cart_frame(
         self,
