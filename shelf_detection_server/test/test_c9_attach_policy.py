@@ -725,6 +725,62 @@ def test_server_subscribes_to_raw_odom_for_settle_samples():
     assert "lookup_transform" not in lookup_calls
 
 
+def test_scan_odom_and_service_use_distinct_callback_groups():
+    tree = _server_tree()
+    init = _function(tree, "__init__")
+
+    assignments = {
+        target.attr
+        for node in init.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Attribute)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "MutuallyExclusiveCallbackGroup"
+    }
+    subscription_groups = {
+        target.attr: keyword.value.attr
+        for node in init.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Attribute)
+        for target in node.targets
+        if isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr in {"create_subscription", "create_service"}
+        for keyword in node.value.keywords
+        if keyword.arg == "callback_group"
+        and isinstance(keyword.value, ast.Attribute)
+    }
+
+    assert {"_scan_group", "_odom_group", "_service_group"} <= assignments
+    assert subscription_groups["_scan_sub"] == "_scan_group"
+    assert subscription_groups["_odom_sub"] == "_odom_group"
+    assert subscription_groups["_service"] == "_service_group"
+    assert len(set(subscription_groups.values())) == 3
+
+
+def test_executor_has_capacity_for_scan_odom_and_service():
+    tree = _server_tree()
+    main = _function(tree, "main")
+    executor_call = next(
+        node
+        for node in ast.walk(main)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "MultiThreadedExecutor"
+    )
+    thread_keyword = next(
+        keyword
+        for keyword in executor_call.keywords
+        if keyword.arg == "num_threads"
+    )
+
+    assert isinstance(thread_keyword.value, ast.Constant)
+    assert thread_keyword.value.value >= 3
+
+
 def test_heading_correction_uses_shelf_normal_and_is_capped():
     assert bounded_yaw_correction(-0.066, 1.0, 0.40) == pytest.approx(
         -0.066

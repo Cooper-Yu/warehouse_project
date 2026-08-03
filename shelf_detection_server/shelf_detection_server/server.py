@@ -185,6 +185,7 @@ class ShelfDetectionServer(Node):
         self._latest_odom_yaw_sample: Optional[tuple] = None
         self._odom_lock = threading.Lock()
         self._scan_group = MutuallyExclusiveCallbackGroup()
+        self._odom_group = MutuallyExclusiveCallbackGroup()
         self._service_group = MutuallyExclusiveCallbackGroup()
         self._scan_sub = self.create_subscription(
             LaserScan,
@@ -198,7 +199,7 @@ class ShelfDetectionServer(Node):
             str(self.get_parameter("odom_topic").value),
             self._odom_callback,
             qos_profile_sensor_data,
-            callback_group=self._scan_group,
+            callback_group=self._odom_group,
         )
         self._cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self._elevator_up_pub = self.create_publisher(
@@ -1234,7 +1235,8 @@ class ShelfDetectionServer(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = ShelfDetectionServer()
-    executor = MultiThreadedExecutor(num_threads=2)
+    # Keep scan, odom, and the long-running service independently schedulable.
+    executor = MultiThreadedExecutor(num_threads=3)
     executor.add_node(node)
     try:
         executor.spin()
