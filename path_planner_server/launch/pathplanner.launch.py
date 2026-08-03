@@ -73,6 +73,7 @@ def _navigation_nodes(condition, use_sim_time, files):
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     use_keepout = LaunchConfiguration("use_keepout")
+    use_rviz = LaunchConfiguration("use_rviz")
     keepout_mask_file = LaunchConfiguration("keepout_mask_file")
     package_share = FindPackageShare("path_planner_server")
     map_package_share = FindPackageShare("map_server")
@@ -114,6 +115,14 @@ def generate_launch_description():
                 description=(
                     "Start the keepout mask/filter chain. Defaults to enabled "
                     "for simulation and disabled for the still-gated real profile."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "use_rviz",
+                default_value="true",
+                description=(
+                    "Start the single Checkpoint 12 Navigation RViz. "
+                    "Localization RViz remains disabled by default."
                 ),
             ),
             DeclareLaunchArgument(
@@ -183,6 +192,7 @@ def generate_launch_description():
                 executable="rviz2",
                 name="rviz2_navigation",
                 output="screen",
+                condition=IfCondition(use_rviz),
                 arguments=[
                     "-d",
                     PathJoinSubstitution([package_share, "rviz", "navigation.rviz"]),

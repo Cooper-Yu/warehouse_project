@@ -10,6 +10,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
+from std_srvs.srv import Empty
 
 
 class AutoInitialPose(Node):
@@ -24,6 +25,7 @@ class AutoInitialPose(Node):
         self.declare_parameter("covariance_y", 0.25)
         self.declare_parameter("covariance_yaw", math.radians(15.0) ** 2)
         self.declare_parameter("timeout", 30.0)
+        self.declare_parameter("particle_subscriber_timeout", 60.0)
 
         self._scan_received = False
         self._scan_subscription = self.create_subscription(
@@ -38,6 +40,10 @@ class AutoInitialPose(Node):
             10,
         )
         self._amcl_state = self.create_client(GetState, "/amcl/get_state")
+        self._nomotion_update = self.create_client(
+            Empty,
+            "/request_nomotion_update",
+        )
 
     def _scan_callback(self, _message):
         self._scan_received = True
@@ -96,6 +102,36 @@ class AutoInitialPose(Node):
         while rclpy.ok() and time.monotonic() < end:
             rclpy.spin_once(self, timeout_sec=0.05)
 
+    def refresh_particles_for_late_subscriber(self):
+        """Request one AMCL update after an RViz particle subscriber joins."""
+        timeout = float(
+            self.get_parameter("particle_subscriber_timeout").value
+        )
+        deadline = time.monotonic() + timeout
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.1)
+            subscriptions = self.get_subscriptions_info_by_topic(
+                "/particle_cloud"
+            )
+            if not subscriptions:
+                continue
+            if not self._nomotion_update.wait_for_service(timeout_sec=0.0):
+                continue
+            future = self._nomotion_update.call_async(Empty.Request())
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            if future.done() and future.result() is not None:
+                self.get_logger().info(
+                    "requested one no-motion AMCL update after "
+                    "/particle_cloud subscriber became available"
+                )
+                return True
+        self.get_logger().warning(
+            "no /particle_cloud subscriber appeared within "
+            f"{timeout:.1f}s; localization remains initialized, but a "
+            "late RViz may need /request_nomotion_update"
+        )
+        return False
+
 
 def main():
     rclpy.init()
@@ -104,6 +140,7 @@ def main():
     try:
         if node.wait_until_ready():
             node.publish_initial_pose()
+            node.refresh_particles_for_late_subscriber()
         else:
             node.get_logger().error(
                 "auto initial pose timed out before AMCL, scan, and "
