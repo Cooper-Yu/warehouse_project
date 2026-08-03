@@ -305,7 +305,7 @@ def test_shipping_rejects_unbounded_yaw_without_spin(monkeypatch):
     assert navigator.spin_requests == []
 
 
-def test_shipping_runs_one_spin_and_rechecks_fresh_pose(monkeypatch):
+def test_shipping_runs_partial_spin_and_rechecks_fresh_pose(monkeypatch):
     task_result = SimpleNamespace(SUCCEEDED=1, FAILED=2, CANCELED=3)
     navigator = FakeAlignmentNavigator(task_result.SUCCEEDED)
     observations = iter([
@@ -336,4 +336,107 @@ def test_shipping_runs_one_spin_and_rechecks_fresh_pose(monkeypatch):
 
     assert accepted
     assert len(navigator.spin_requests) == 1
-    assert abs(navigator.spin_requests[0][0] - 0.2) < 1e-9
+    assert abs(navigator.spin_requests[0][0] - 0.1) < 1e-9
+
+
+def test_shipping_runs_up_to_three_partial_spins(monkeypatch):
+    task_result = SimpleNamespace(SUCCEEDED=1, FAILED=2, CANCELED=3)
+    navigator = FakeAlignmentNavigator(task_result.SUCCEEDED)
+    observations = iter([
+        _transform(1.0, 2.0, -0.30),
+        _transform(1.0, 2.0, -0.20),
+        _transform(1.0, 2.0, -0.12),
+        _transform(1.0, 2.0, -0.08),
+    ])
+    monkeypatch.setattr(move_shelf_to_ship, "TaskResult", task_result)
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_settle_without_motion", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_lookup_fresh_transform",
+        lambda *_args: next(observations),
+    )
+
+    accepted = move_shelf_to_ship._accept_or_align_shipping_pose(
+        navigator,
+        _shipping_pose(),
+        "robot_base_footprint",
+        0.25,
+        0.10,
+        0.40,
+        15.0,
+        1.0,
+        5.0,
+    )
+
+    assert accepted
+    requested_angles = [
+        request[0] for request in navigator.spin_requests
+    ]
+    assert len(requested_angles) == 3
+    assert abs(requested_angles[0] - 0.15) < 1e-9
+    assert abs(requested_angles[1] - 0.10) < 1e-9
+    assert abs(requested_angles[2] - 0.06) < 1e-9
+
+
+def test_shipping_rejects_after_three_partial_spins(monkeypatch):
+    task_result = SimpleNamespace(SUCCEEDED=1, FAILED=2, CANCELED=3)
+    navigator = FakeAlignmentNavigator(task_result.SUCCEEDED)
+    observations = iter([
+        _transform(1.0, 2.0, -0.30),
+        _transform(1.0, 2.0, -0.25),
+        _transform(1.0, 2.0, -0.20),
+        _transform(1.0, 2.0, -0.15),
+    ])
+    monkeypatch.setattr(move_shelf_to_ship, "TaskResult", task_result)
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_settle_without_motion", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_lookup_fresh_transform",
+        lambda *_args: next(observations),
+    )
+
+    accepted = move_shelf_to_ship._accept_or_align_shipping_pose(
+        navigator,
+        _shipping_pose(),
+        "robot_base_footprint",
+        0.25,
+        0.10,
+        0.40,
+        15.0,
+        1.0,
+        5.0,
+    )
+
+    assert not accepted
+    assert len(navigator.spin_requests) == 3
+
+
+def test_shipping_accepts_before_requesting_tiny_spin(monkeypatch):
+    navigator = FakeAlignmentNavigator()
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_settle_without_motion", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_lookup_fresh_transform",
+        lambda *_args: _transform(1.0, 2.0, -0.08),
+    )
+
+    accepted = move_shelf_to_ship._accept_or_align_shipping_pose(
+        navigator,
+        _shipping_pose(),
+        "robot_base_footprint",
+        0.25,
+        0.10,
+        0.40,
+        15.0,
+        1.0,
+        5.0,
+    )
+
+    assert accepted
+    assert navigator.spin_requests == []
