@@ -178,6 +178,7 @@ def test_c9_policy_parameters_are_declared():
     assert declared["center_lock_min_steps"] == 2
     assert declared["center_drive_scale"] == 1.0
     assert declared["cart_frame_retry_count"] == 6
+    assert declared["odom_topic"] == "/odom"
     assert declared["odom_frame"] == "odom"
     assert declared["odom_lookup_timeout"] == 1.0
     assert declared["measured_drive_timeout_scale"] == 3.0
@@ -653,6 +654,75 @@ def test_post_rotation_settling_is_wrap_safe(monkeypatch):
     monkeypatch.setattr(server_module.rclpy, "ok", lambda: True)
 
     assert harness.settle(10.0) == pytest.approx(-3.138)
+
+
+def test_odom_callback_caches_stamped_yaw_for_settling():
+    from shelf_detection_server.server import ShelfDetectionServer
+
+    class _Stamp:
+        sec = 12
+        nanosec = 345
+
+    class _Header:
+        stamp = _Stamp()
+
+    class _Orientation:
+        x = 0.0
+        y = 0.0
+        z = math.sin(-0.4 / 2.0)
+        w = math.cos(-0.4 / 2.0)
+
+    class _PoseValue:
+        orientation = _Orientation()
+
+    class _Pose:
+        pose = _PoseValue()
+
+    class _Odom:
+        header = _Header()
+        pose = _Pose()
+
+    class _OdomHarness:
+        def __init__(self):
+            import threading
+
+            self._odom_lock = threading.Lock()
+            self._latest_odom_yaw_sample = None
+
+    harness = _OdomHarness()
+    ShelfDetectionServer._odom_callback(harness, _Odom())
+
+    assert ShelfDetectionServer._lookup_odom_yaw_sample(harness) == (
+        12_000_000_345,
+        pytest.approx(-0.4),
+    )
+
+
+def test_server_subscribes_to_raw_odom_for_settle_samples():
+    tree = _server_tree()
+    init = _function(tree, "__init__")
+    callback = _function(tree, "_odom_callback")
+    lookup = _function(tree, "_lookup_odom_yaw_sample")
+
+    init_names = {
+        node.id for node in ast.walk(init) if isinstance(node, ast.Name)
+    }
+    callback_attributes = {
+        node.attr
+        for node in ast.walk(callback)
+        if isinstance(node, ast.Attribute)
+    }
+    lookup_calls = {
+        node.attr
+        for node in ast.walk(lookup)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.ctx, ast.Load)
+    }
+
+    assert "Odometry" in init_names
+    assert "stamp" in callback_attributes
+    assert "orientation" in callback_attributes
+    assert "lookup_transform" not in lookup_calls
 
 
 def test_heading_correction_uses_shelf_normal_and_is_capped():

@@ -7,6 +7,7 @@ from typing import Optional
 
 import rclpy
 from geometry_msgs.msg import PointStamped, TransformStamped, Twist
+from nav_msgs.msg import Odometry
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -159,6 +160,7 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("center_lock_min_steps", 2)
         self.declare_parameter("center_drive_scale", 1.0)
         self.declare_parameter("cart_frame_retry_count", 6)
+        self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("odom_lookup_timeout", 1.0)
         self.declare_parameter("measured_drive_timeout_scale", 3.0)
@@ -180,12 +182,21 @@ class ShelfDetectionServer(Node):
         self._latest_scan: Optional[LaserScan] = None
         self._scan_sequence = 0
         self._scan_lock = threading.Lock()
+        self._latest_odom_yaw_sample: Optional[tuple] = None
+        self._odom_lock = threading.Lock()
         self._scan_group = MutuallyExclusiveCallbackGroup()
         self._service_group = MutuallyExclusiveCallbackGroup()
         self._scan_sub = self.create_subscription(
             LaserScan,
             "/scan",
             self._scan_callback,
+            qos_profile_sensor_data,
+            callback_group=self._scan_group,
+        )
+        self._odom_sub = self.create_subscription(
+            Odometry,
+            str(self.get_parameter("odom_topic").value),
+            self._odom_callback,
             qos_profile_sensor_data,
             callback_group=self._scan_group,
         )
@@ -216,6 +227,15 @@ class ShelfDetectionServer(Node):
         with self._scan_lock:
             self._latest_scan = scan
             self._scan_sequence += 1
+
+    def _odom_callback(self, odom: Odometry) -> None:
+        stamp = odom.header.stamp
+        stamp_nanoseconds = (
+            int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+        )
+        yaw = planar_yaw_from_quaternion(odom.pose.pose.orientation)
+        with self._odom_lock:
+            self._latest_odom_yaw_sample = (stamp_nanoseconds, yaw)
 
     def _handle_request(
         self, request: GoToLoading.Request, response: GoToLoading.Response
@@ -835,22 +855,8 @@ class ShelfDetectionServer(Node):
         return None
 
     def _lookup_odom_yaw_sample(self) -> Optional[tuple]:
-        odom_frame = str(self.get_parameter("odom_frame").value)
-        base_frame = str(self.get_parameter("target_base_frame").value)
-        try:
-            transform = self._tf_buffer.lookup_transform(
-                odom_frame, base_frame, rclpy.time.Time()
-            )
-            stamp = transform.header.stamp
-            stamp_nanoseconds = (
-                int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
-            )
-            return (
-                stamp_nanoseconds,
-                planar_yaw_from_quaternion(transform.transform.rotation),
-            )
-        except TransformException:
-            return None
+        with self._odom_lock:
+            return self._latest_odom_yaw_sample
 
     def _lookup_odom_yaw(self) -> Optional[float]:
         sample = self._lookup_odom_yaw_sample()
