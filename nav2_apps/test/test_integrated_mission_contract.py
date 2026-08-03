@@ -61,8 +61,9 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
     positions = [mission_source.index(call) for call in expected_calls]
 
     assert positions == sorted(positions)
-    assert "SIM_INIT_POSE" in source
     assert "integrated_mode = not any(operation_modes)" in source
+    assert "integrated simulation mission will initialize AMCL" not in source
+    assert "_wait_for_existing_localization" in source
 
 
 def test_integrated_exit_allows_only_one_clearance_refinement():
@@ -99,3 +100,18 @@ def test_pathplanner_launch_owns_simulation_shelf_server():
     assert 'package="shelf_detection_server"' in launch_source
     assert 'executable="shelf_detection_server"' in launch_source
     assert "condition=IfCondition(use_sim_time)" in launch_source
+
+
+def test_localization_launch_initializes_simulation_before_mission():
+    repository = Path(__file__).parents[2]
+    launch_source = (
+        repository
+        / "localization_server"
+        / "launch"
+        / "localization.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"auto_initial_pose"' in launch_source
+    assert "default_value=use_sim_time" in launch_source
+    assert 'executable="auto_initial_pose.py"' in launch_source
+    assert "condition=IfCondition(auto_initial_pose_enabled)" in launch_source

@@ -1936,13 +1936,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
             )
 
-        if integrated_mode and initial_pose is None:
-            initial_pose = SIM_INIT_POSE
-            navigator.get_logger().info(
-                "integrated simulation mission will initialize AMCL at "
-                "init_position=(0,0,0)"
-            )
-
         if initial_pose is not None:
             navigator.setInitialPose(
                 _pose(navigator, args.frame_id, *initial_pose)

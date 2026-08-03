@@ -93,10 +93,11 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "auto_initial_pose",
-            default_value="false",
+            default_value=use_sim_time,
             description=(
-                "Initialize AMCL from the configured pose only when this "
-                "flag and use_sim_time are true."
+                "Initialize AMCL from the configured pose in simulation. "
+                "Defaults to use_sim_time so the course localization launch "
+                "establishes particles and map TF before the mission starts."
             ),
         ),
         DeclareLaunchArgument("initial_x", default_value="0.0"),
