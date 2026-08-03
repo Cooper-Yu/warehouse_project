@@ -9,6 +9,7 @@ from typing import List, Optional
 import rclpy
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+from rclpy.utilities import remove_ros_args
 from std_msgs.msg import String
 
 from nav2_apps.pose_config import (
@@ -180,6 +181,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--return-timeout", type=float, default=180.0)
     return parser
+
+
+def _parse_application_args(
+    argv: Optional[List[str]] = None,
+) -> argparse.Namespace:
+    """Parse mission arguments strictly while preserving ROS arguments."""
+    raw_args = sys.argv if argv is None else argv
+    application_args = remove_ros_args(args=raw_args)
+    if argv is None:
+        # remove_ros_args preserves the executable at sys.argv[0].
+        application_args = application_args[1:]
+    return _parser().parse_args(application_args)
 
 
 def _pose(
@@ -769,14 +782,14 @@ def _navigate_to_init(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    args, ros_args = _parser().parse_known_args(argv)
+    args = _parse_application_args(argv)
     try:
         initial_pose = optional_initial_pose(args)
     except ValueError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return int(ExitCode.UNKNOWN)
 
-    rclpy.init(args=ros_args)
+    rclpy.init(args=argv)
     navigator = BasicNavigator()
     try:
         operation_modes = (
