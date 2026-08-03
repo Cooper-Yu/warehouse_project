@@ -126,6 +126,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--shipping-timeout", type=float, default=180.0)
     parser.add_argument(
+        "--shipping-position-tolerance", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--shipping-yaw-tolerance", type=float, default=0.10
+    )
+    parser.add_argument(
+        "--shipping-max-yaw-correction", type=float, default=0.40
+    )
+    parser.add_argument(
+        "--shipping-alignment-timeout", type=float, default=15.0
+    )
+    parser.add_argument(
+        "--shipping-alignment-settle", type=float, default=1.0
+    )
+    parser.add_argument(
+        "--shipping-pose-lookup-timeout", type=float, default=5.0
+    )
+    parser.add_argument(
         "--lower-only",
         action="store_true",
         help=(
@@ -403,6 +421,167 @@ def _yaw_from_rotation(rotation) -> float:
         rotation.y * rotation.y + rotation.z * rotation.z
     )
     return math.atan2(siny_cosp, cosy_cosp)
+
+
+def _shipping_pose_error(transform, target_x, target_y, target_yaw):
+    """Return position and wrap-safe yaw error for shipping acceptance."""
+    dx = target_x - transform.transform.translation.x
+    dy = target_y - transform.transform.translation.y
+    position_error = math.hypot(dx, dy)
+    current_yaw = _yaw_from_rotation(transform.transform.rotation)
+    yaw_error = _normalize_angle(target_yaw - current_yaw)
+    return position_error, yaw_error
+
+
+def _lookup_fresh_transform(
+    navigator: BasicNavigator,
+    target_frame: str,
+    base_frame: str,
+    timeout: float,
+):
+    """Read a bounded fresh transform after spinning the shared executor."""
+    import tf2_ros
+
+    if timeout <= 0.0:
+        return None
+    buffer = tf2_ros.Buffer()
+    listener = tf2_ros.TransformListener(buffer, navigator, spin_thread=False)
+    deadline = time.monotonic() + timeout
+    try:
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.1)
+            try:
+                return buffer.lookup_transform(
+                    target_frame, base_frame, rclpy.time.Time()
+                )
+            except tf2_ros.TransformException:
+                continue
+    finally:
+        del listener
+    return None
+
+
+def _accept_or_align_shipping_pose(
+    navigator: BasicNavigator,
+    shipping_pose: PoseStamped,
+    base_frame: str,
+    position_tolerance: float,
+    yaw_tolerance: float,
+    max_yaw_correction: float,
+    alignment_timeout: float,
+    alignment_settle: float,
+    lookup_timeout: float,
+) -> bool:
+    """Accept shipping pose or perform one collision-checked Nav2 Spin."""
+    if (
+        position_tolerance <= 0.0
+        or yaw_tolerance < 0.0
+        or max_yaw_correction <= 0.0
+        or alignment_timeout <= 0.0
+        or alignment_settle < 0.0
+        or lookup_timeout <= 0.0
+    ):
+        navigator.get_logger().error(
+            "invalid shipping alignment parameters"
+        )
+        return False
+
+    if not _settle_without_motion(navigator, alignment_settle):
+        return False
+    transform = _lookup_fresh_transform(
+        navigator, shipping_pose.header.frame_id, base_frame, lookup_timeout
+    )
+    if transform is None:
+        navigator.get_logger().error(
+            "shipping acceptance failed: fresh map pose unavailable"
+        )
+        return False
+
+    target_x = shipping_pose.pose.position.x
+    target_y = shipping_pose.pose.position.y
+    target_yaw = _yaw_from_rotation(shipping_pose.pose.orientation)
+    position_error, yaw_error = _shipping_pose_error(
+        transform, target_x, target_y, target_yaw
+    )
+    navigator.get_logger().info(
+        "shipping pose observation: "
+        f"position_error={position_error:.3f} "
+        f"yaw_error={yaw_error:.3f}"
+    )
+    if position_error > position_tolerance:
+        navigator.get_logger().error(
+            "shipping alignment rejected: position is outside the "
+            f"acceptance radius ({position_error:.3f}>"
+            f"{position_tolerance:.3f})"
+        )
+        return False
+    if abs(yaw_error) <= yaw_tolerance:
+        return True
+    if abs(yaw_error) > max_yaw_correction:
+        navigator.get_logger().error(
+            "shipping alignment rejected: required yaw correction exceeds "
+            f"bound ({abs(yaw_error):.3f}>{max_yaw_correction:.3f})"
+        )
+        return False
+
+    navigator.get_logger().warning(
+        "shipping fine-yaw correction requested through Nav2 Spin: "
+        f"yaw={yaw_error:.3f}"
+    )
+    if not navigator.spin(
+        spin_dist=yaw_error,
+        time_allowance=max(1, int(math.ceil(alignment_timeout))),
+    ):
+        navigator.get_logger().error(
+            "shipping fine-yaw Spin goal was rejected"
+        )
+        return False
+    deadline = time.monotonic() + alignment_timeout
+    while not navigator.isTaskComplete():
+        if time.monotonic() >= deadline:
+            navigator.cancelTask()
+            navigator.get_logger().error(
+                "shipping fine-yaw Spin timed out; cancel requested"
+            )
+            return False
+        rclpy.spin_once(navigator, timeout_sec=0.1)
+    spin_result = classify_task_result(navigator.getResult(), TaskResult)
+    if spin_result != ExitCode.SUCCEEDED:
+        navigator.get_logger().error(
+            "shipping fine-yaw Spin did not succeed"
+        )
+        return False
+
+    if not _settle_without_motion(navigator, alignment_settle):
+        return False
+    transform = _lookup_fresh_transform(
+        navigator, shipping_pose.header.frame_id, base_frame, lookup_timeout
+    )
+    if transform is None:
+        navigator.get_logger().error(
+            "shipping final acceptance failed: fresh map pose unavailable"
+        )
+        return False
+    position_error, yaw_error = _shipping_pose_error(
+        transform, target_x, target_y, target_yaw
+    )
+    navigator.get_logger().info(
+        "shipping final pose observation: "
+        f"position_error={position_error:.3f} "
+        f"yaw_error={yaw_error:.3f}"
+    )
+    accepted = (
+        position_error <= position_tolerance
+        and abs(yaw_error) <= yaw_tolerance
+    )
+    if not accepted:
+        navigator.get_logger().error(
+            "shipping final pose rejected after Spin: "
+            f"position_error={position_error:.3f}/"
+            f"{position_tolerance:.3f} "
+            f"yaw_error={abs(yaw_error):.3f}/{yaw_tolerance:.3f}"
+        )
+    return accepted
 
 
 def _exit_progress(
@@ -703,6 +882,13 @@ def _navigate_to_shipping(
     navigator: BasicNavigator,
     shipping_pose: PoseStamped,
     timeout: float,
+    base_frame: str,
+    position_tolerance: float,
+    yaw_tolerance: float,
+    max_yaw_correction: float,
+    alignment_timeout: float,
+    alignment_settle: float,
+    lookup_timeout: float,
 ) -> ExitCode:
     """Navigate once to shipping and expose a bounded terminal result."""
     if timeout <= 0.0:
@@ -734,9 +920,24 @@ def _navigate_to_shipping(
             f"shipping_position goal did not succeed: {result}"
         )
         return exit_code
+    navigator.get_logger().info("shipping_position Nav2 goal succeeded")
+    if not _accept_or_align_shipping_pose(
+        navigator,
+        shipping_pose,
+        base_frame,
+        position_tolerance,
+        yaw_tolerance,
+        max_yaw_correction,
+        alignment_timeout,
+        alignment_settle,
+        lookup_timeout,
+    ):
+        navigator.get_logger().error(
+            "Slice 3A stopped at SHIPPING_ALIGNMENT_PENDING"
+        )
+        return ExitCode.UNKNOWN
     navigator.get_logger().info(
-        "shipping_position goal succeeded; "
-        "Slice 3A stopped at AT_SHIPPING"
+        "shipping pose accepted; Slice 3A stopped at AT_SHIPPING"
     )
     return ExitCode.SUCCEEDED
 
@@ -1044,6 +1245,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     navigator,
                     shipping_pose,
                     args.shipping_timeout,
+                    args.base_frame,
+                    args.shipping_position_tolerance,
+                    args.shipping_yaw_tolerance,
+                    args.shipping_max_yaw_correction,
+                    args.shipping_alignment_timeout,
+                    args.shipping_alignment_settle,
+                    args.shipping_pose_lookup_timeout,
                 )
             )
 
