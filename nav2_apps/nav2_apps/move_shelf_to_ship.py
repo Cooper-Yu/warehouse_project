@@ -12,6 +12,7 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from std_msgs.msg import String
 
 from nav2_apps.pose_config import (
+    SIM_INIT_POSE,
     SIM_LOADING_POSE,
     SIM_SHIPPING_POSE,
     optional_initial_pose,
@@ -149,7 +150,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--odom-frame", default="odom")
     parser.add_argument("--exit-distance", type=float, default=0.75)
     parser.add_argument("--exit-speed", type=float, default=0.05)
-    parser.add_argument("--exit-timeout", type=float, default=25.0)
+    parser.add_argument("--exit-timeout", type=float, default=40.0)
     parser.add_argument("--exit-heading-tolerance", type=float, default=0.03)
     parser.add_argument("--exit-lateral-tolerance", type=float, default=0.10)
     parser.add_argument("--odom-lookup-timeout", type=float, default=1.0)
@@ -160,6 +161,24 @@ def _parser() -> argparse.ArgumentParser:
         "--unloaded-footprint",
         default=SIM_UNLOADED_FOOTPRINT,
     )
+    parser.add_argument(
+        "--return-only",
+        action="store_true",
+        help=(
+            "After explicit clear/stopped/unloaded confirmation, verify "
+            "unloaded footprints and navigate once to init_position."
+        ),
+    )
+    parser.add_argument("--confirm-clear-of-shelf", action="store_true")
+    parser.add_argument("--confirm-unloaded-footprint", action="store_true")
+    parser.add_argument("--return-x", type=float, default=SIM_INIT_POSE[0])
+    parser.add_argument("--return-y", type=float, default=SIM_INIT_POSE[1])
+    parser.add_argument(
+        "--return-yaw",
+        type=float,
+        default=SIM_INIT_POSE[2],
+    )
+    parser.add_argument("--return-timeout", type=float, default=180.0)
     return parser
 
 
@@ -709,6 +728,46 @@ def _navigate_to_shipping(
     return ExitCode.SUCCEEDED
 
 
+def _navigate_to_init(
+    navigator: BasicNavigator,
+    init_pose: PoseStamped,
+    timeout: float,
+) -> ExitCode:
+    """Navigate once to init_position and expose a bounded terminal result."""
+    if timeout <= 0.0:
+        navigator.get_logger().error("return timeout must be positive")
+        return ExitCode.UNKNOWN
+    navigator.get_logger().info(
+        "Navigating to init_position: "
+        f"{init_pose.pose.position.x} {init_pose.pose.position.y}..."
+    )
+    if not navigator.goToPose(init_pose):
+        navigator.get_logger().error("init_position goal was rejected")
+        return ExitCode.GOAL_REJECTED
+
+    deadline = time.monotonic() + timeout
+    while not navigator.isTaskComplete():
+        if time.monotonic() >= deadline:
+            navigator.cancelTask()
+            navigator.get_logger().error(
+                "init_position navigation timed out; cancel requested"
+            )
+            return ExitCode.CANCELED
+        rclpy.spin_once(navigator, timeout_sec=0.1)
+
+    result = navigator.getResult()
+    exit_code = classify_task_result(result, TaskResult)
+    if exit_code != ExitCode.SUCCEEDED:
+        navigator.get_logger().error(
+            f"init_position goal did not succeed: {result}"
+        )
+        return exit_code
+    navigator.get_logger().info(
+        "init_position goal succeeded; Slice 3C stopped at AT_INIT"
+    )
+    return ExitCode.SUCCEEDED
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args, ros_args = _parser().parse_known_args(argv)
     try:
@@ -727,10 +786,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.shipping_only,
             args.lower_only,
             args.exit_restore_only,
+            args.return_only,
         )
         if sum(bool(mode) for mode in operation_modes) > 1:
             navigator.get_logger().error(
-                "detection, attach, footprint, shipping, lower, and exit "
+                "detection, attach, footprint, shipping, lower, exit, and "
+                "return "
                 "modes are mutually exclusive"
             )
             return int(ExitCode.UNKNOWN)
@@ -853,6 +914,56 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "return navigation"
             )
             return int(ExitCode.SUCCEEDED)
+
+        if args.return_only:
+            if not (
+                args.confirm_clear_of_shelf
+                and args.confirm_unloaded_footprint
+                and args.confirm_robot_stopped
+            ):
+                navigator.get_logger().error(
+                    "return-only requires explicit clear-of-shelf, "
+                    "unloaded-footprint, and stopped-state confirmations"
+                )
+                return int(ExitCode.UNKNOWN)
+            if initial_pose is not None:
+                navigator.get_logger().error(
+                    "return-only requires existing AMCL localization; "
+                    "initial pose override is not allowed"
+                )
+                return int(ExitCode.UNKNOWN)
+            if not _wait_for_existing_localization(
+                navigator,
+                args.localization_timeout,
+            ):
+                navigator.get_logger().error(
+                    "No existing AMCL pose received before localization "
+                    "timeout"
+                )
+                return int(ExitCode.UNKNOWN)
+
+            navigator.waitUntilNav2Active()
+            if not _apply_unloaded_footprint_verified(
+                navigator,
+                args.unloaded_footprint,
+                args.footprint_timeout,
+                args.footprint_edge_tolerance,
+            ):
+                return int(ExitCode.UNKNOWN)
+            init_pose = _pose(
+                navigator,
+                args.frame_id,
+                args.return_x,
+                args.return_y,
+                args.return_yaw,
+            )
+            return int(
+                _navigate_to_init(
+                    navigator,
+                    init_pose,
+                    args.return_timeout,
+                )
+            )
 
         if args.loaded_footprint_only:
             if not (

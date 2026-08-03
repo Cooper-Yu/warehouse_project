@@ -5,6 +5,7 @@ from typing import Any, Optional, Tuple
 
 SIM_LOADING_POSE = (5.520, 0.041, -1.598)
 SIM_SHIPPING_POSE = (1.985395, 0.923544, 1.570796)
+SIM_INIT_POSE = (0.0, 0.0, 0.0)
 
 
 def optional_initial_pose(args: Any) -> Optional[Tuple[float, float, float]]:

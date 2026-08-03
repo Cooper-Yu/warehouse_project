@@ -121,7 +121,7 @@ def test_exit_restore_defaults_match_reviewed_simulation_plan():
 
     assert args.exit_distance == 0.75
     assert args.exit_speed == 0.05
-    assert args.exit_timeout == 25.0
+    assert args.exit_timeout == 40.0
     assert args.exit_heading_tolerance == 0.03
     assert args.clearance_x == 0.36
 

@@ -32,6 +32,8 @@ def phase_from_log(message: str, current: str) -> str:
     """Map selected mission log messages to a compact evidence phase."""
     text = message.lower()
     transitions = (
+        ("navigating to init_position", "NAV_TO_INIT"),
+        ("init_position goal succeeded", "AT_INIT"),
         ("navigating to shipping_position", "NAV_TO_SHIPPING"),
         ("shipping_position goal succeeded", "AT_SHIPPING"),
         ("published elevator-down", "ELEVATOR_DOWN"),

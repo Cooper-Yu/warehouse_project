@@ -47,6 +47,10 @@ def test_phase_transitions_cover_navigation_and_shelf_events():
     assert phase == "CLEAR_OF_SHELF"
     phase = phase_from_log("unloaded_footprint_verified", phase)
     assert phase == "UNLOADED_FOOTPRINT_VERIFIED"
+    phase = phase_from_log("Navigating to init_position: 0.0 0.0", phase)
+    assert phase == "NAV_TO_INIT"
+    phase = phase_from_log("init_position goal succeeded", phase)
+    assert phase == "AT_INIT"
 
 
 def test_unrelated_log_keeps_current_phase():
