@@ -13,11 +13,13 @@ setup(
             "config/real_staging.yaml",
             "config/real_entry.yaml",
             "config/real_entry_refine.yaml",
+            "config/real_final_center.yaml",
         ]),
         ("share/" + package_name + "/launch", [
             "launch/real_staging.launch.py",
             "launch/real_entry.launch.py",
             "launch/real_entry_refine.launch.py",
+            "launch/real_final_center.launch.py",
         ]),
     ],
     install_requires=["setuptools"],

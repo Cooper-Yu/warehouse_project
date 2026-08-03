@@ -136,6 +136,12 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("staging_only", False)
         self.declare_parameter("entry_only", False)
         self.declare_parameter("entry_refine_only", False)
+        self.declare_parameter("final_center_only", False)
+        self.declare_parameter("final_center_confirmed_front_offset", 0.0)
+        self.declare_parameter("final_center_confirmed_shelf_depth", 0.0)
+        self.declare_parameter("final_center_max_distance", 0.55)
+        self.declare_parameter("final_center_speed", 0.02)
+        self.declare_parameter("final_center_timeout", 40.0)
         self.declare_parameter(
             "entry_refine_required_completed_distance", 0.303
         )
@@ -260,13 +266,36 @@ class ShelfDetectionServer(Node):
         entry_refine_only = bool(
             self.get_parameter("entry_refine_only").value
         )
-        if sum((staging_only, entry_only, entry_refine_only)) > 1:
+        final_center_only = bool(
+            self.get_parameter("final_center_only").value
+        )
+        if sum(
+            (
+                staging_only,
+                entry_only,
+                entry_refine_only,
+                final_center_only,
+            )
+        ) > 1:
             self._publish_stop()
             response.complete = False
             self.get_logger().error(
                 "complete=false: staging_only, entry_only, and "
-                "entry_refine_only are mutually exclusive"
+                "entry_refine_only, and final_center_only are mutually "
+                "exclusive"
             )
+            return response
+
+        if final_center_only:
+            if not request.attach_to_shelf:
+                self._publish_stop()
+                response.complete = False
+                self.get_logger().error(
+                    "complete=false: final-center-only requires explicit "
+                    "attach_to_shelf=true confirmation"
+                )
+                return response
+            response.complete = self._perform_final_center_only()
             return response
 
         if entry_refine_only:
@@ -436,6 +465,84 @@ class ShelfDetectionServer(Node):
         self.get_logger().info(
             "complete=true: entry-refine-only bounded cart-center "
             "distance complete; stopped before final push and elevator"
+        )
+        return True
+
+    def _perform_final_center_only(self) -> bool:
+        """Derive and move to the measured shelf center, never lift."""
+        front_offset = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "final_center_confirmed_front_offset"
+                ).value
+            ),
+        )
+        shelf_depth = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "final_center_confirmed_shelf_depth"
+                ).value
+            ),
+        )
+        distance = front_offset + shelf_depth / 2.0
+        max_distance = max(
+            0.0,
+            float(self.get_parameter("final_center_max_distance").value),
+        )
+        speed = max(
+            0.0,
+            float(self.get_parameter("final_center_speed").value),
+        )
+        if (
+            front_offset <= 0.0
+            or shelf_depth <= 0.0
+            or distance > max_distance
+            or speed <= 0.0
+        ):
+            self._publish_stop()
+            self.get_logger().error(
+                "final-center-only rejected before motion: confirmed "
+                "front offset and shelf depth are required; "
+                f"front_offset={front_offset:.3f} "
+                f"depth={shelf_depth:.3f} "
+                f"derived_distance={distance:.3f}/{max_distance:.3f} "
+                f"speed={speed:.3f}"
+            )
+            return False
+
+        deadline = time.monotonic() + max(
+            0.0,
+            float(self.get_parameter("final_center_timeout").value),
+        )
+        accepted_odom_yaw = self._wait_for_stable_odom_yaw(deadline)
+        if accepted_odom_yaw is None:
+            self._publish_stop()
+            self.get_logger().error(
+                "final-center-only rejected: stopped odom yaw unavailable"
+            )
+            return False
+
+        self.get_logger().warning(
+            "final-center-only started from confirmed square-shelf geometry: "
+            f"front_offset={front_offset:.3f} depth={shelf_depth:.3f} "
+            f"derived_distance={distance:.3f} speed={speed:.3f} "
+            f"accepted_odom_yaw={accepted_odom_yaw:.3f}"
+        )
+        if not self._drive_forward_measured(distance, deadline, speed):
+            self._publish_stop()
+            return False
+        if not self._accepted_odom_heading_ok(
+            accepted_odom_yaw, deadline
+        ):
+            self._publish_stop()
+            return False
+
+        self._publish_stop()
+        self.get_logger().info(
+            "complete=true: final-center-only measured distance complete; "
+            "stopped before elevator"
         )
         return True
 

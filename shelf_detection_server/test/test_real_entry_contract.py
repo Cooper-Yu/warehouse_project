@@ -144,21 +144,20 @@ def test_request_rejects_multiple_real_modes_together():
     handler = _function(tree, "_handle_request")
     handler_source = ast.get_source_segment(source, handler)
 
-    assert "sum((staging_only, entry_only, entry_refine_only)) > 1" in (
-        handler_source
-    )
+    assert "final_center_only" in handler_source
     assert '"complete=false: staging_only, entry_only, and "' in (
         handler_source
     )
-    assert '"entry_refine_only are mutually exclusive"' in handler_source
-    rejection = handler_source.index(
-        "if sum((staging_only, entry_only, entry_refine_only)) > 1:"
+    assert '"entry_refine_only, and final_center_only are mutually "' in (
+        handler_source
     )
+    rejection = handler_source.index("if sum(")
+    final_center = handler_source.index("if final_center_only:")
     refine = handler_source.index("if entry_refine_only:")
     detection = handler_source.index("target = self._wait_for_cart_frame()")
     staging = handler_source.index("if staging_only:")
     entry = handler_source.index("if entry_only:")
-    assert rejection < refine < detection < staging < entry
+    assert rejection < final_center < refine < detection < staging < entry
 
 
 def test_real_entry_launch_loads_only_real_entry_profile():

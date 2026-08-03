@@ -1,0 +1,26 @@
+shelf_detection_server:
+  ros__parameters:
+    use_sim_time: false
+    staging_only: false
+    entry_only: false
+    entry_refine_only: false
+    final_center_only: true
+    target_base_frame: robot_base_footprint
+    odom_topic: /odom
+    odom_frame: robot_odom
+
+    # Current stopped boundary leaves the detected front-leg midpoint plane
+    # 0.20 m ahead of robot_base_footprint. The learner observed that the
+    # shelf is square in top view, so the measured 0.6562 m transverse outer
+    # width is also its confirmed depth. The server derives:
+    #   0.20 + 0.6562 / 2 = 0.5281 m
+    # Do not copy simulation's 0.3703 m calibration.
+    final_center_confirmed_front_offset: 0.20
+    final_center_confirmed_shelf_depth: 0.6562
+    final_center_max_distance: 0.55
+    final_center_speed: 0.02
+    final_center_timeout: 40.0
+    entry_odom_yaw_tolerance: 0.04
+
+    # Full-attach final push remains unreachable in final_center_only mode.
+    final_drive_distance: 0.0
