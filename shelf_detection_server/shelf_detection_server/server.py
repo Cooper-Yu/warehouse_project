@@ -76,11 +76,22 @@ def alignment_yaw_command(
     fine_threshold: float,
     fine_gain: float,
     fine_speed: float,
+    fine_min_speed: Optional[float] = None,
+    fine_speed_gain: float = 0.0,
 ) -> tuple:
     """Return damped correction, positive speed, and regime name."""
     fine = abs(yaw) <= max(fine_threshold, 0.0)
     gain = fine_gain if fine else coarse_gain
     speed = fine_speed if fine else coarse_speed
+    if fine and fine_speed_gain > 0.0:
+        minimum = min(
+            max(0.0, fine_speed if fine_min_speed is None else fine_min_speed),
+            max(0.0, fine_speed),
+        )
+        speed = max(
+            minimum,
+            min(abs(yaw) * fine_speed_gain, max(0.0, fine_speed)),
+        )
     return (
         bounded_yaw_correction(yaw, gain, max_abs_correction),
         speed,
@@ -180,6 +191,10 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("alignment_fine_yaw_threshold", 0.20)
         self.declare_parameter("alignment_fine_heading_gain", 0.50)
         self.declare_parameter("alignment_fine_rotate_speed", 0.05)
+        # Disabled by default so standalone/real profiles retain the
+        # previously verified fixed fine speed. The simulation launch opts in.
+        self.declare_parameter("alignment_fine_min_rotate_speed", 0.05)
+        self.declare_parameter("alignment_fine_speed_gain", 0.0)
         self.declare_parameter("alignment_standoff_distance", 1.00)
         self.declare_parameter("alignment_position_tolerance", 0.08)
         self.declare_parameter("alignment_retry_count", 6)
@@ -217,6 +232,9 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("alignment_settle_sample_count", 3)
         self.declare_parameter("alignment_settle_yaw_tolerance", 0.01)
         self.declare_parameter("alignment_required_consecutive_samples", 2)
+        # Equal to yaw_tolerance by default. Simulation may opt into a
+        # slightly wider hold band after the first strict accepted sample.
+        self.declare_parameter("alignment_heading_hold_tolerance", 0.03)
         self.declare_parameter("entry_odom_yaw_tolerance", 0.03)
         # Simulation shelf is approximately square: 0.7406 m / 2.
         # Real and non-square shelves must override this calibrated value.
@@ -1181,8 +1199,20 @@ class ShelfDetectionServer(Node):
             position_error = math.hypot(error_x, error_y)
             observation_fresh = True
             safe_zone = True
+            heading_tolerance = (
+                max(
+                    yaw_tolerance,
+                    float(
+                        self.get_parameter(
+                            "alignment_heading_hold_tolerance"
+                        ).value
+                    ),
+                )
+                if aligned_samples > 0
+                else yaw_tolerance
+            )
             heading_ok = shelf_heading_aligned(
-                shelf_heading, yaw_tolerance
+                shelf_heading, heading_tolerance
             )
             lateral_decision = classify_lateral_center(
                 error_y,
@@ -1407,9 +1437,7 @@ class ShelfDetectionServer(Node):
                     self._wait_for_stable_odom_yaw(deadline) is None
                 ):
                     return None
-            elif not shelf_heading_aligned(
-                shelf_heading, yaw_tolerance
-            ):
+            elif not heading_ok:
                 aligned_samples = 0
                 if correction_count >= retry_count:
                     self.get_logger().error(
@@ -1448,6 +1476,16 @@ class ShelfDetectionServer(Node):
                             "alignment_fine_rotate_speed"
                         ).value
                     ),
+                    float(
+                        self.get_parameter(
+                            "alignment_fine_min_rotate_speed"
+                        ).value
+                    ),
+                    float(
+                        self.get_parameter(
+                            "alignment_fine_speed_gain"
+                        ).value
+                    ),
                 )
                 self.get_logger().info(
                     "safe-standoff yaw correction selected: "
@@ -1478,6 +1516,7 @@ class ShelfDetectionServer(Node):
                     f"{required_aligned_samples} "
                     f"position_error={position_error:.3f} "
                     f"shelf_normal_yaw={shelf_heading:.3f} "
+                    f"heading_tolerance={heading_tolerance:.3f} "
                     f"accepted_odom_yaw={accepted_odom_yaw:.3f}"
                 )
                 if aligned_samples >= required_aligned_samples:

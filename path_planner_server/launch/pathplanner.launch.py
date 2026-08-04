@@ -225,6 +225,12 @@ def generate_launch_description():
                             lateral_execution_enabled,
                             value_type=bool,
                         ),
+                        # Simulation-only fine alignment: slow down
+                        # proportionally near zero and retain a strict first
+                        # sample with a small hysteresis band for confirmation.
+                        "alignment_fine_min_rotate_speed": 0.015,
+                        "alignment_fine_speed_gain": 0.50,
+                        "alignment_heading_hold_tolerance": 0.04,
                     }
                 ],
             ),

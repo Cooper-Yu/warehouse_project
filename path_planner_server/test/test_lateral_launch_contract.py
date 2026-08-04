@@ -57,6 +57,9 @@ def test_lateral_execution_argument_only_reaches_simulation_shelf_node():
     assert condition_source == "IfCondition(use_sim_time)"
     assert '"lateral_execution_enabled": ParameterValue(' in node_source
     assert "lateral_execution_enabled," in node_source
+    assert '"alignment_fine_min_rotate_speed": 0.015' in node_source
+    assert '"alignment_fine_speed_gain": 0.50' in node_source
+    assert '"alignment_heading_hold_tolerance": 0.04' in node_source
 
 
 def test_real_navigation_branch_does_not_receive_lateral_argument():

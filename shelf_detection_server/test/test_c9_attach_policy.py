@@ -91,10 +91,13 @@ class _AlignmentHarness:
             "alignment_fine_yaw_threshold": 0.20,
             "alignment_fine_heading_gain": 0.50,
             "alignment_fine_rotate_speed": 0.05,
+            "alignment_fine_min_rotate_speed": 0.05,
+            "alignment_fine_speed_gain": 0.0,
             "alignment_settle_timeout": 2.0,
             "alignment_settle_sample_count": 3,
             "alignment_settle_yaw_tolerance": 0.01,
             "alignment_required_consecutive_samples": 2,
+            "alignment_heading_hold_tolerance": 0.03,
             "movement_timeout": 75.0,
         }
         self.recovered_targets = list(recovered_targets)
@@ -188,6 +191,8 @@ def test_c9_policy_parameters_are_declared():
     assert declared["alignment_fine_yaw_threshold"] == 0.20
     assert declared["alignment_fine_heading_gain"] == 0.50
     assert declared["alignment_fine_rotate_speed"] == 0.05
+    assert declared["alignment_fine_min_rotate_speed"] == 0.05
+    assert declared["alignment_fine_speed_gain"] == 0.0
     assert declared["alignment_standoff_distance"] == 1.00
     assert declared["alignment_position_tolerance"] == 0.08
     assert declared["alignment_retry_count"] == 6
@@ -213,6 +218,7 @@ def test_c9_policy_parameters_are_declared():
     assert declared["alignment_settle_sample_count"] == 3
     assert declared["alignment_settle_yaw_tolerance"] == 0.01
     assert declared["alignment_required_consecutive_samples"] == 2
+    assert declared["alignment_heading_hold_tolerance"] == 0.03
     assert declared["final_drive_distance"] == pytest.approx(0.3703)
     assert declared["entry_odom_yaw_tolerance"] == 0.03
     assert declared["lateral_execution_enabled"] is False
@@ -1006,6 +1012,52 @@ def test_alignment_yaw_command_damps_cloud_oscillation_samples(
     assert correction == pytest.approx(expected_correction)
     assert speed == pytest.approx(expected_speed)
     assert regime == expected_regime
+
+
+@pytest.mark.parametrize(
+    "yaw,expected_speed",
+    [
+        (0.20, 0.05),
+        (0.08, 0.04),
+        (0.031, 0.0155),
+        (0.01, 0.015),
+    ],
+)
+def test_alignment_yaw_command_scales_fine_speed_with_error(
+    yaw, expected_speed
+):
+    _, speed, regime = alignment_yaw_command(
+        yaw=yaw,
+        coarse_gain=1.0,
+        max_abs_correction=0.40,
+        coarse_speed=0.20,
+        fine_threshold=0.20,
+        fine_gain=0.50,
+        fine_speed=0.05,
+        fine_min_speed=0.015,
+        fine_speed_gain=0.50,
+    )
+
+    assert speed == pytest.approx(expected_speed)
+    assert regime == "fine"
+
+
+def test_alignment_hysteresis_accepts_strict_then_hold_band_sample():
+    harness = _AlignmentHarness(
+        recovered_targets=[
+            ("laser", 0.989, -0.031, -0.031),
+        ]
+    )
+    harness.parameters["alignment_heading_hold_tolerance"] = 0.04
+
+    result = harness._align_at_safe_standoff(
+        ("laser", 0.991, -0.025, -0.025),
+        time.monotonic() + 1.0,
+    )
+
+    assert result is not None
+    assert harness.rotations == []
+    assert harness.settle_count == 2
 
 
 class _EntryHarness:
