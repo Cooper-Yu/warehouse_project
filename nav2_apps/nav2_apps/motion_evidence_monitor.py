@@ -43,6 +43,13 @@ def phase_from_log(message: str, current: str) -> str:
         ("loaded egress:", "LOADED_EGRESS"),
         ("loaded_egress_complete", "SHIPPING_NAV_READY"),
         ("loaded_localization_stable", "LOCALIZATION_READY"),
+        ("loaded_path_probe_ready", "PATH_PROBE_READY"),
+        ("loaded_path_probe_no_path", "PATH_PROBE_NO_PATH"),
+        ("loaded_path_probe_uncertain", "PATH_PROBE_UNCERTAIN"),
+        (
+            "loaded_shipping_no_path_at_aligned_heading",
+            "ALIGNED_NO_PATH",
+        ),
         ("loaded_shipping_speeds_verified", "LOADED_SPEEDS_READY"),
         ("shipping canceled: loaded localization jump", "LOCALIZATION_ABORT"),
         ("published elevator-down", "ELEVATOR_DOWN"),

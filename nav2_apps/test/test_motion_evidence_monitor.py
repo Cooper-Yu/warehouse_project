@@ -42,6 +42,21 @@ def test_phase_transitions_cover_navigation_and_shelf_events():
     assert phase == "SHIPPING_NAV_READY"
     phase = phase_from_log("LOADED_LOCALIZATION_STABLE", phase)
     assert phase == "LOCALIZATION_READY"
+    phase = phase_from_log("LOADED_PATH_PROBE_READY: poses=181", phase)
+    assert phase == "PATH_PROBE_READY"
+    phase = phase_from_log(
+        "LOADED_PATH_PROBE_NO_PATH: planner returned no current path",
+        phase,
+    )
+    assert phase == "PATH_PROBE_NO_PATH"
+    phase = phase_from_log(
+        "LOADED_PATH_PROBE_UNCERTAIN: result timeout", phase
+    )
+    assert phase == "PATH_PROBE_UNCERTAIN"
+    phase = phase_from_log(
+        "LOADED_SHIPPING_NO_PATH_AT_ALIGNED_HEADING", phase
+    )
+    assert phase == "ALIGNED_NO_PATH"
     phase = phase_from_log("LOADED_SHIPPING_SPEEDS_VERIFIED", phase)
     assert phase == "LOADED_SPEEDS_READY"
     phase = phase_from_log("Navigating to shipping_position: 1.98", phase)

@@ -1,6 +1,7 @@
 """Checkpoint 12 loading and C9-style shelf-attach orchestration."""
 
 import argparse
+from enum import Enum, auto
 import math
 import sys
 import time
@@ -33,6 +34,14 @@ SIM_UNLOADED_FOOTPRINT = (
     "[[0.25, 0.25], [-0.25, 0.25], "
     "[-0.25, -0.25], [0.25, -0.25]]"
 )
+
+
+class PathProbeResult(Enum):
+    """Authoritative result of the current stopped planning probe."""
+
+    PATH_READY = auto()
+    NO_PATH = auto()
+    UNCERTAIN = auto()
 
 
 def _load_shelf_service_type():
@@ -797,11 +806,13 @@ def _bounded_loaded_shipping_path_probe(
     planner_id: str,
     timeout: float,
     endpoint_tolerance: float,
-) -> Optional[bool]:
-    """Return True for a valid path, False for no path, None if uncertain."""
+) -> PathProbeResult:
+    """Classify the stopped planning probe without commanding motion."""
     if timeout <= 0.0 or endpoint_tolerance < 0.0 or not planner_id:
-        navigator.get_logger().error("invalid loaded path probe parameters")
-        return None
+        navigator.get_logger().error(
+            "LOADED_PATH_PROBE_UNCERTAIN: invalid parameters"
+        )
+        return PathProbeResult.UNCERTAIN
     deadline = time.monotonic() + timeout
     client = navigator.compute_path_to_pose_client
     while rclpy.ok() and time.monotonic() < deadline:
@@ -809,9 +820,9 @@ def _bounded_loaded_shipping_path_probe(
             break
     else:
         navigator.get_logger().error(
-            "loaded shipping path probe timed out waiting for planner"
+            "LOADED_PATH_PROBE_UNCERTAIN: planner server timeout"
         )
-        return None
+        return PathProbeResult.UNCERTAIN
 
     request = ComputePathToPose.Goal()
     request.goal = goal
@@ -826,15 +837,15 @@ def _bounded_loaded_shipping_path_probe(
         rclpy.spin_once(navigator, timeout_sec=0.1)
     if not send_future.done() or send_future.result() is None:
         navigator.get_logger().error(
-            "loaded shipping path probe timed out before goal acceptance"
+            "LOADED_PATH_PROBE_UNCERTAIN: goal acceptance timeout"
         )
-        return None
+        return PathProbeResult.UNCERTAIN
     goal_handle = send_future.result()
     if not goal_handle.accepted:
         navigator.get_logger().warning(
-            "loaded shipping path probe rejected by planner"
+            "LOADED_PATH_PROBE_UNCERTAIN: goal rejected"
         )
-        return False
+        return PathProbeResult.UNCERTAIN
 
     result_future = goal_handle.get_result_async()
     while (
@@ -853,31 +864,33 @@ def _bounded_loaded_shipping_path_probe(
         ):
             rclpy.spin_once(navigator, timeout_sec=0.1)
         navigator.get_logger().error(
-            "loaded shipping path probe timed out; cancel requested"
+            "LOADED_PATH_PROBE_UNCERTAIN: result timeout; cancel requested"
         )
-        return None
+        return PathProbeResult.UNCERTAIN
 
     wrapped_result = result_future.result()
-    if (
-        wrapped_result is None
-        or wrapped_result.status != GoalStatus.STATUS_SUCCEEDED
-    ):
-        navigator.get_logger().info(
-            "loaded shipping path probe found no current path"
+    if wrapped_result is None:
+        navigator.get_logger().error(
+            "LOADED_PATH_PROBE_UNCERTAIN: result missing"
         )
-        return False
+        return PathProbeResult.UNCERTAIN
+    if wrapped_result.status != GoalStatus.STATUS_SUCCEEDED:
+        navigator.get_logger().info(
+            "LOADED_PATH_PROBE_NO_PATH: planner returned no current path"
+        )
+        return PathProbeResult.NO_PATH
     path = wrapped_result.result.path
     if not _path_reaches_goal(
         path, goal.header.frame_id, goal, endpoint_tolerance
     ):
         navigator.get_logger().warning(
-            "loaded shipping path probe returned an invalid path"
+            "LOADED_PATH_PROBE_UNCERTAIN: invalid successful path"
         )
-        return False
+        return PathProbeResult.UNCERTAIN
     navigator.get_logger().info(
-        f"LOADED_SHIPPING_PATH_READY: poses={len(path.poses)}"
+        f"LOADED_PATH_PROBE_READY: poses={len(path.poses)}"
     )
-    return True
+    return PathProbeResult.PATH_READY
 
 
 def _wait_parameter_future(navigator, future, timeout: float):
@@ -1565,7 +1578,7 @@ def _prealign_loaded_shipping_bearing(
             args.shipping_y,
             args.shipping_yaw,
         )
-        path_ready = _bounded_loaded_shipping_path_probe(
+        probe_result = _bounded_loaded_shipping_path_probe(
             navigator,
             shipping_pose,
             args.loaded_prealign_planner_id,
@@ -1573,7 +1586,7 @@ def _prealign_loaded_shipping_bearing(
             args.loaded_prealign_path_end_tolerance,
         )
         if (
-            path_ready is True
+            probe_result is PathProbeResult.PATH_READY
             and abs(error)
             <= args.loaded_prealign_path_handoff_max_bearing
         ):
@@ -1583,25 +1596,28 @@ def _prealign_loaded_shipping_bearing(
                 f"requested_total={requested_total:.3f}"
             )
             return True
-        if path_ready is True:
+        if probe_result is PathProbeResult.PATH_READY:
             navigator.get_logger().info(
                 "loaded shipping path ready but bearing remains outside "
                 "bounded handoff: "
                 f"error={error:.3f} max="
                 f"{args.loaded_prealign_path_handoff_max_bearing:.3f}"
             )
-        if path_ready is None:
+        if probe_result is PathProbeResult.UNCERTAIN:
             navigator.get_logger().error(
                 "loaded shipping prealignment stopped: path probe uncertain"
             )
             return False
-        if abs(error) <= tolerance:
-            navigator.get_logger().info(
-                "LOADED_SHIPPING_PREALIGN_COMPLETE: "
+        if (
+            probe_result is PathProbeResult.NO_PATH
+            and abs(error) <= tolerance
+        ):
+            navigator.get_logger().error(
+                "LOADED_SHIPPING_NO_PATH_AT_ALIGNED_HEADING: "
                 f"remaining_bearing_error={error:.3f} "
                 f"requested_total={requested_total:.3f}"
             )
-            return True
+            return False
 
         segment = math.copysign(min(abs(error), max_segment), error)
         if requested_total + abs(segment) > max_total:

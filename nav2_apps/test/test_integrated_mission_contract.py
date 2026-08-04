@@ -188,7 +188,11 @@ def test_loaded_shipping_prealign_is_geometry_derived_segmented_and_guarded():
     assert "loaded shipping path ready but bearing remains outside" in (
         prealign_source
     )
-    assert "if path_ready is None" in prealign_source
+    assert "probe_result is PathProbeResult.PATH_READY" in prealign_source
+    assert "probe_result is PathProbeResult.NO_PATH" in prealign_source
+    assert "probe_result is PathProbeResult.UNCERTAIN" in prealign_source
+    assert "LOADED_SHIPPING_NO_PATH_AT_ALIGNED_HEADING" in prealign_source
+    assert "if abs(error) <= tolerance" not in prealign_source
     assert "LOADED_PREALIGN_LOCALIZATION_RECONFIRM" in prealign_source
     assert "LOADED_PREALIGN_LOCALIZATION_RECONFIRMED" in prealign_source
     assert "LOADED_SHIPPING_PREALIGN_COMPLETE" in prealign_source
@@ -232,6 +236,12 @@ def test_loaded_path_probe_is_bounded_and_never_starts_navigation():
     assert "goal_handle.cancel_goal_async()" in probe_source
     assert "GoalStatus.STATUS_SUCCEEDED" in probe_source
     assert "_path_reaches_goal" in probe_source
+    assert "PathProbeResult.PATH_READY" in probe_source
+    assert "PathProbeResult.NO_PATH" in probe_source
+    assert "PathProbeResult.UNCERTAIN" in probe_source
+    assert "LOADED_PATH_PROBE_READY" in probe_source
+    assert "LOADED_PATH_PROBE_NO_PATH" in probe_source
+    assert "LOADED_PATH_PROBE_UNCERTAIN" in probe_source
     assert "goToPose" not in probe_source
     assert "cmd_vel" not in probe_source
 
