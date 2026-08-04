@@ -190,6 +190,16 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-prealign-bearing-tolerance", type=float, default=0.20
     )
     parser.add_argument(
+        "--loaded-prealign-max-confirmable-position-jump",
+        type=float,
+        default=0.23,
+    )
+    parser.add_argument(
+        "--loaded-prealign-max-localization-confirmations",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
         "--loaded-localization-samples", type=int, default=5
     )
     parser.add_argument(
@@ -731,6 +741,21 @@ def _wait_for_loaded_localization_stability(
         "loaded localization gate timed out before stable samples"
     )
     return False
+
+
+def _prealign_localization_reconfirmation_allowed(
+    monitor: _LoadedLocalizationMonitor,
+    strict_position_jump: float,
+    strict_yaw_jump: float,
+    max_confirmable_position_jump: float,
+) -> bool:
+    """Allow only a narrow stopped translation correction to be rechecked."""
+    return (
+        strict_position_jump
+        < monitor.last_position_jump
+        <= max_confirmable_position_jump
+        and monitor.last_yaw_jump <= strict_yaw_jump
+    )
 
 
 def _wait_parameter_future(navigator, future, timeout: float):
@@ -1366,13 +1391,27 @@ def _prealign_loaded_shipping_bearing(
     max_segment = args.loaded_prealign_max_segment_yaw
     max_total = args.loaded_prealign_max_total_yaw
     tolerance = args.loaded_prealign_bearing_tolerance
-    if max_segment <= 0.0 or max_total <= 0.0 or tolerance < 0.0:
+    max_confirmable_jump = (
+        args.loaded_prealign_max_confirmable_position_jump
+    )
+    max_confirmations = (
+        args.loaded_prealign_max_localization_confirmations
+    )
+    if (
+        max_segment <= 0.0
+        or max_total <= 0.0
+        or tolerance < 0.0
+        or max_confirmable_jump
+        <= args.loaded_localization_max_position_jump
+        or max_confirmations < 0
+    ):
         navigator.get_logger().error(
             "invalid loaded shipping prealignment parameters"
         )
         return False
 
     requested_total = 0.0
+    localization_confirmations = 0
     while requested_total <= max_total:
         transform = _lookup_fresh_transform(
             navigator,
@@ -1436,10 +1475,43 @@ def _prealign_loaded_shipping_bearing(
             args.loaded_localization_sample_interval,
             args.shipping_pose_lookup_timeout,
         ):
-            navigator.get_logger().error(
-                "loaded shipping prealignment stopped: localization unstable"
+            confirmable = _prealign_localization_reconfirmation_allowed(
+                localization_monitor,
+                args.loaded_localization_max_position_jump,
+                args.loaded_localization_max_yaw_jump,
+                max_confirmable_jump,
             )
-            return False
+            if (
+                not confirmable
+                or localization_confirmations >= max_confirmations
+            ):
+                navigator.get_logger().error(
+                    "loaded shipping prealignment stopped: "
+                    "localization unstable"
+                )
+                return False
+            localization_confirmations += 1
+            navigator.get_logger().warning(
+                "LOADED_PREALIGN_LOCALIZATION_RECONFIRM: "
+                f"translation={localization_monitor.last_position_jump:.3f} "
+                f"yaw={localization_monitor.last_yaw_jump:.3f} "
+                f"attempt={localization_confirmations}/{max_confirmations}"
+            )
+            if not _wait_for_loaded_localization_stability(
+                navigator,
+                localization_monitor,
+                args.loaded_localization_samples,
+                args.loaded_localization_sample_interval,
+                args.shipping_pose_lookup_timeout,
+            ):
+                navigator.get_logger().error(
+                    "loaded shipping prealignment stopped: borderline "
+                    "localization correction did not settle"
+                )
+                return False
+            navigator.get_logger().info(
+                "LOADED_PREALIGN_LOCALIZATION_RECONFIRMED"
+            )
     navigator.get_logger().error(
         "loaded shipping prealignment exhausted total yaw bound"
     )

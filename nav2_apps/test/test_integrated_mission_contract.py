@@ -46,6 +46,8 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_prealign_max_segment_yaw == 0.15
     assert args.loaded_prealign_max_total_yaw == 2.80
     assert args.loaded_prealign_bearing_tolerance == 0.20
+    assert args.loaded_prealign_max_confirmable_position_jump == 0.23
+    assert args.loaded_prealign_max_localization_confirmations == 1
     assert args.loaded_localization_samples == 5
     assert args.loaded_localization_max_position_jump == 0.20
     assert args.loaded_localization_max_yaw_jump == 0.20
@@ -175,7 +177,35 @@ def test_loaded_shipping_prealign_is_geometry_derived_segmented_and_guarded():
     assert "_bounded_rotate_by_odom" in prealign_source
     assert "_settle_without_motion" in prealign_source
     assert "_wait_for_loaded_localization_stability" in prealign_source
+    assert "_prealign_localization_reconfirmation_allowed" in prealign_source
+    assert "LOADED_PREALIGN_LOCALIZATION_RECONFIRM" in prealign_source
+    assert "LOADED_PREALIGN_LOCALIZATION_RECONFIRMED" in prealign_source
     assert "LOADED_SHIPPING_PREALIGN_COMPLETE" in prealign_source
+
+
+def test_prealign_reconfirmation_accepts_only_narrow_translation_boundary():
+    class Monitor:
+        last_position_jump = 0.212
+        last_yaw_jump = 0.006
+
+    assert move_shelf_to_ship._prealign_localization_reconfirmation_allowed(
+        Monitor(), 0.20, 0.20, 0.23
+    )
+
+    Monitor.last_position_jump = 0.315
+    assert not (
+        move_shelf_to_ship._prealign_localization_reconfirmation_allowed(
+            Monitor(), 0.20, 0.20, 0.23
+        )
+    )
+
+    Monitor.last_position_jump = 0.212
+    Monitor.last_yaw_jump = 0.201
+    assert not (
+        move_shelf_to_ship._prealign_localization_reconfirmation_allowed(
+            Monitor(), 0.20, 0.20, 0.23
+        )
+    )
 
 
 def test_integrated_exit_allows_only_one_clearance_refinement():
