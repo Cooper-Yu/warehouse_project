@@ -68,6 +68,7 @@ class _AlignmentHarness:
             "alignment_retry_count": retry_count,
             "alignment_standoff_distance": 1.0,
             "alignment_position_tolerance": 0.08,
+            "center_lateral_tolerance": 0.08,
             "alignment_max_drive_distance": 0.75,
             "alignment_max_travel_yaw": 1.20,
             "alignment_short_drive_distance": 0.20,

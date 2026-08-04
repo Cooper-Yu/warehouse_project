@@ -23,6 +23,12 @@ from tf2_ros import (
 )
 from warehouse_interfaces.srv import GoToLoading
 
+from shelf_detection_server.lateral_center_policy import (
+    classify_lateral_center,
+)
+from shelf_detection_server.lateral_center_state import (
+    next_state_from_decision,
+)
 from shelf_detection_server.leg_geometry import (
     LegPairMeasurement,
     detect_leg_pair,
@@ -910,6 +916,12 @@ class ShelfDetectionServer(Node):
                 self.get_parameter("alignment_position_tolerance").value
             ),
         )
+        lateral_tolerance = max(
+            0.0,
+            float(
+                self.get_parameter("center_lateral_tolerance").value
+            ),
+        )
         max_drive = max(
             0.0,
             float(
@@ -988,6 +1000,29 @@ class ShelfDetectionServer(Node):
                 x, y, shelf_heading, standoff
             )
             position_error = math.hypot(error_x, error_y)
+            observation_fresh = True
+            safe_zone = True
+            heading_ok = shelf_heading_aligned(
+                shelf_heading, yaw_tolerance
+            )
+            lateral_decision = classify_lateral_center(
+                error_y,
+                lateral_tolerance,
+                fresh=observation_fresh,
+                safe_zone=safe_zone,
+                heading_ok=heading_ok,
+            )
+            lateral_state = next_state_from_decision(lateral_decision)
+            self.get_logger().info(
+                "lateral-centering shadow observation: "
+                f"lateral_error={error_y:.3f} "
+                f"tolerance={lateral_tolerance:.3f} "
+                f"fresh={observation_fresh} "
+                f"safe_zone={safe_zone} "
+                f"heading_ok={heading_ok} "
+                f"decision={lateral_decision.value} "
+                f"state={lateral_state.value}"
+            )
             self.get_logger().info(
                 "safe-standoff alignment sample: "
                 f"observation={observation}/{observation_limit} "
