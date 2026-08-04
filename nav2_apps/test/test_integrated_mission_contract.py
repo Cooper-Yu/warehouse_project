@@ -43,6 +43,9 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_final_reverse == 0.25
     assert args.loaded_egress_linear_speed == 0.05
     assert args.loaded_egress_angular_speed == 0.05
+    assert args.loaded_prealign_max_segment_yaw == 0.15
+    assert args.loaded_prealign_max_total_yaw == 2.80
+    assert args.loaded_prealign_bearing_tolerance == 0.20
     assert args.loaded_localization_samples == 5
     assert args.loaded_localization_max_position_jump == 0.20
     assert args.loaded_localization_max_yaw_jump == 0.20
@@ -64,6 +67,7 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
         "_apply_loaded_footprint_verified",
         "_loaded_egress_before_shipping",
         "_wait_for_loaded_localization_stability",
+        "_prealign_loaded_shipping_bearing",
         "_controller_speed_snapshot",
         "_set_controller_speeds",
         "_navigate_to_shipping",
@@ -154,6 +158,24 @@ def test_loaded_egress_turn_uses_signed_odom_accumulation_and_stops():
     assert "command.angular.z = direction * speed" in turn_source
     assert "finally:" in turn_source
     assert "publisher.publish(stop)" in turn_source
+
+
+def test_loaded_shipping_prealign_is_geometry_derived_segmented_and_guarded():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    prealign = _function(tree, "_prealign_loaded_shipping_bearing")
+    prealign_source = ast.get_source_segment(source, prealign)
+
+    assert "math.atan2" in prealign_source
+    assert "args.shipping_y - current_y" in prealign_source
+    assert "args.shipping_x - current_x" in prealign_source
+    assert "_normalize_angle(bearing - current_yaw)" in prealign_source
+    assert "min(abs(error), max_segment)" in prealign_source
+    assert "requested_total + abs(segment) > max_total" in prealign_source
+    assert "_bounded_rotate_by_odom" in prealign_source
+    assert "_settle_without_motion" in prealign_source
+    assert "_wait_for_loaded_localization_stability" in prealign_source
+    assert "LOADED_SHIPPING_PREALIGN_COMPLETE" in prealign_source
 
 
 def test_integrated_exit_allows_only_one_clearance_refinement():

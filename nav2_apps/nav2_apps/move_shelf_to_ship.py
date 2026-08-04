@@ -181,6 +181,15 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-egress-yaw-tolerance", type=float, default=0.01
     )
     parser.add_argument(
+        "--loaded-prealign-max-segment-yaw", type=float, default=0.15
+    )
+    parser.add_argument(
+        "--loaded-prealign-max-total-yaw", type=float, default=2.80
+    )
+    parser.add_argument(
+        "--loaded-prealign-bearing-tolerance", type=float, default=0.20
+    )
+    parser.add_argument(
         "--loaded-localization-samples", type=int, default=5
     )
     parser.add_argument(
@@ -1348,6 +1357,95 @@ def _loaded_egress_before_shipping(
     return True
 
 
+def _prealign_loaded_shipping_bearing(
+    navigator: BasicNavigator,
+    args: argparse.Namespace,
+    localization_monitor: _LoadedLocalizationMonitor,
+) -> bool:
+    """Reduce the fresh-map shipping bearing error in guarded odom segments."""
+    max_segment = args.loaded_prealign_max_segment_yaw
+    max_total = args.loaded_prealign_max_total_yaw
+    tolerance = args.loaded_prealign_bearing_tolerance
+    if max_segment <= 0.0 or max_total <= 0.0 or tolerance < 0.0:
+        navigator.get_logger().error(
+            "invalid loaded shipping prealignment parameters"
+        )
+        return False
+
+    requested_total = 0.0
+    while requested_total <= max_total:
+        transform = _lookup_fresh_transform(
+            navigator,
+            args.frame_id,
+            args.base_frame,
+            args.shipping_pose_lookup_timeout,
+        )
+        if transform is None:
+            navigator.get_logger().error(
+                "loaded shipping prealignment rejected: map pose unavailable"
+            )
+            return False
+        current_x = transform.transform.translation.x
+        current_y = transform.transform.translation.y
+        current_yaw = _yaw_from_rotation(transform.transform.rotation)
+        bearing = math.atan2(
+            args.shipping_y - current_y,
+            args.shipping_x - current_x,
+        )
+        error = _normalize_angle(bearing - current_yaw)
+        if abs(error) <= tolerance:
+            navigator.get_logger().info(
+                "LOADED_SHIPPING_PREALIGN_COMPLETE: "
+                f"remaining_bearing_error={error:.3f} "
+                f"requested_total={requested_total:.3f}"
+            )
+            return True
+
+        segment = math.copysign(min(abs(error), max_segment), error)
+        if requested_total + abs(segment) > max_total:
+            navigator.get_logger().error(
+                "loaded shipping prealignment rejected: total yaw bound "
+                f"would be exceeded requested={requested_total:.3f} "
+                f"next={segment:.3f} max={max_total:.3f}"
+            )
+            return False
+        navigator.get_logger().info(
+            "loaded shipping prealignment segment: "
+            f"bearing={bearing:.3f} current_yaw={current_yaw:.3f} "
+            f"error={error:.3f} command={segment:.3f}"
+        )
+        if not _bounded_rotate_by_odom(
+            navigator,
+            args.cmd_vel_topic,
+            args.odom_frame,
+            args.base_frame,
+            segment,
+            args.loaded_egress_angular_speed,
+            args.loaded_egress_motion_timeout,
+            args.odom_lookup_timeout,
+            args.loaded_egress_yaw_tolerance,
+        ):
+            return False
+        requested_total += abs(segment)
+        if not _settle_without_motion(navigator, args.exit_settle):
+            return False
+        if not _wait_for_loaded_localization_stability(
+            navigator,
+            localization_monitor,
+            args.loaded_localization_samples,
+            args.loaded_localization_sample_interval,
+            args.shipping_pose_lookup_timeout,
+        ):
+            navigator.get_logger().error(
+                "loaded shipping prealignment stopped: localization unstable"
+            )
+            return False
+    navigator.get_logger().error(
+        "loaded shipping prealignment exhausted total yaw bound"
+    )
+    return False
+
+
 def _settle_without_motion(
     navigator: BasicNavigator, wait_seconds: float
 ) -> bool:
@@ -1785,6 +1883,10 @@ def _run_integrated_mission(
         args.loaded_localization_samples,
         args.loaded_localization_sample_interval,
         args.shipping_pose_lookup_timeout,
+    ):
+        return ExitCode.UNKNOWN
+    if not _prealign_loaded_shipping_bearing(
+        navigator, args, localization_monitor
     ):
         return ExitCode.UNKNOWN
 
