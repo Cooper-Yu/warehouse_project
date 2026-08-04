@@ -43,6 +43,11 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_final_reverse == 0.25
     assert args.loaded_egress_linear_speed == 0.05
     assert args.loaded_egress_angular_speed == 0.05
+    assert args.loaded_localization_samples == 5
+    assert args.loaded_localization_max_position_jump == 0.20
+    assert args.loaded_localization_max_yaw_jump == 0.20
+    assert args.loaded_shipping_max_linear_speed == 0.15
+    assert args.loaded_shipping_max_angular_speed == 0.30
     assert args.exit_distance == 0.75
     assert args.clearance_refine_distance == 0.02
     assert args.clearance_x == 0.36
@@ -58,6 +63,9 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
         "_request_stepwise_attach",
         "_apply_loaded_footprint_verified",
         "_loaded_egress_before_shipping",
+        "_wait_for_loaded_localization_stability",
+        "_controller_speed_snapshot",
+        "_set_controller_speeds",
         "_navigate_to_shipping",
         "_bounded_forward_by_odom",
         "_publish_elevator_down_and_wait",
@@ -70,6 +78,37 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
     assert "integrated_mode = not any(operation_modes)" in source
     assert "integrated simulation mission will initialize AMCL" not in source
     assert "_wait_for_existing_localization" in source
+    assert "CONTROLLER_SPEEDS_RESTORED" in mission_source
+
+
+def test_localization_step_rejects_translation_and_yaw_jumps():
+    stable = (1.0, -2.0, 0.10)
+
+    assert move_shelf_to_ship.localization_step_is_stable(
+        stable, (1.05, -1.95, 0.15), 0.20, 0.20
+    )
+    assert not move_shelf_to_ship.localization_step_is_stable(
+        stable, (1.30, -2.0, 0.10), 0.20, 0.20
+    )
+    assert not move_shelf_to_ship.localization_step_is_stable(
+        stable, (1.0, -2.0, 0.40), 0.20, 0.20
+    )
+
+
+def test_loaded_localization_monitor_reads_direct_map_to_odom_transform():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    monitor = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and node.name == "_LoadedLocalizationMonitor"
+    )
+    monitor_source = ast.get_source_segment(source, monitor)
+
+    assert '"map", self.odom_frame' in monitor_source
+    assert '"map", self.base_frame' not in monitor_source
+    assert "self.odom_frame, self.base_frame" not in monitor_source
 
 
 def test_loaded_egress_is_bounded_and_ordered_before_shipping():

@@ -9,6 +9,8 @@ from typing import List, Optional
 import rclpy
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.utilities import remove_ros_args
 from std_msgs.msg import String
 
@@ -177,6 +179,27 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--loaded-egress-yaw-tolerance", type=float, default=0.01
+    )
+    parser.add_argument(
+        "--loaded-localization-samples", type=int, default=5
+    )
+    parser.add_argument(
+        "--loaded-localization-sample-interval", type=float, default=0.20
+    )
+    parser.add_argument(
+        "--loaded-localization-max-position-jump", type=float, default=0.20
+    )
+    parser.add_argument(
+        "--loaded-localization-max-yaw-jump", type=float, default=0.20
+    )
+    parser.add_argument(
+        "--loaded-shipping-max-linear-speed", type=float, default=0.15
+    )
+    parser.add_argument(
+        "--loaded-shipping-max-angular-speed", type=float, default=0.30
+    )
+    parser.add_argument(
+        "--controller-parameter-timeout", type=float, default=5.0
     )
     parser.add_argument(
         "--lower-only",
@@ -574,6 +597,175 @@ def _lookup_fresh_transform(
     finally:
         del listener
     return None
+
+
+def localization_step_is_stable(
+    previous: tuple,
+    current: tuple,
+    max_position_jump: float,
+    max_yaw_jump: float,
+) -> bool:
+    """Reject a discontinuous map-to-odom correction step."""
+    if max_position_jump <= 0.0 or max_yaw_jump <= 0.0:
+        return False
+    position_jump = math.hypot(
+        current[0] - previous[0], current[1] - previous[1]
+    )
+    yaw_jump = abs(_normalize_angle(current[2] - previous[2]))
+    return position_jump <= max_position_jump and yaw_jump <= max_yaw_jump
+
+
+class _LoadedLocalizationMonitor:
+    """Track direct map-to-odom continuity with one shared TF buffer."""
+
+    def __init__(
+        self,
+        navigator: BasicNavigator,
+        odom_frame: str,
+        base_frame: str,
+        max_position_jump: float,
+        max_yaw_jump: float,
+    ) -> None:
+        import tf2_ros
+
+        self.navigator = navigator
+        self.odom_frame = odom_frame
+        self.base_frame = base_frame
+        self.max_position_jump = max_position_jump
+        self.max_yaw_jump = max_yaw_jump
+        self.buffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(
+            self.buffer, navigator, spin_thread=False
+        )
+        self.previous: Optional[tuple] = None
+
+    def sample(self) -> Optional[bool]:
+        import tf2_ros
+
+        try:
+            transform = self.buffer.lookup_transform(
+                "map", self.odom_frame, rclpy.time.Time()
+            )
+        except tf2_ros.TransformException:
+            return None
+        current = (
+            transform.transform.translation.x,
+            transform.transform.translation.y,
+            _yaw_from_rotation(transform.transform.rotation),
+        )
+        if self.previous is None:
+            self.previous = current
+            return True
+        stable = localization_step_is_stable(
+            self.previous,
+            current,
+            self.max_position_jump,
+            self.max_yaw_jump,
+        )
+        self.previous = current
+        return stable
+
+
+def _wait_for_loaded_localization_stability(
+    navigator: BasicNavigator,
+    monitor: _LoadedLocalizationMonitor,
+    sample_count: int,
+    sample_interval: float,
+    timeout: float,
+) -> bool:
+    """Require consecutive available stable map-to-odom samples."""
+    if sample_count < 2 or sample_interval <= 0.0 or timeout <= 0.0:
+        navigator.get_logger().error(
+            "invalid loaded localization gate parameters"
+        )
+        return False
+    deadline = time.monotonic() + timeout
+    accepted = 0
+    while rclpy.ok() and time.monotonic() < deadline:
+        rclpy.spin_once(navigator, timeout_sec=sample_interval)
+        stable = monitor.sample()
+        if stable is None:
+            continue
+        if not stable:
+            navigator.get_logger().error(
+                "loaded localization gate rejected: map-to-odom jump"
+            )
+            return False
+        accepted += 1
+        if accepted >= sample_count:
+            navigator.get_logger().info(
+                "LOADED_LOCALIZATION_STABLE: "
+                f"samples={accepted}/{sample_count}"
+            )
+            return True
+    navigator.get_logger().error(
+        "loaded localization gate timed out before stable samples"
+    )
+    return False
+
+
+def _wait_parameter_future(navigator, future, timeout: float):
+    deadline = time.monotonic() + timeout
+    while rclpy.ok() and not future.done():
+        if time.monotonic() >= deadline:
+            return None
+        rclpy.spin_once(navigator, timeout_sec=0.1)
+    return future.result() if future.done() else None
+
+
+def _controller_speed_snapshot(
+    navigator: BasicNavigator, timeout: float
+) -> Optional[dict]:
+    client = navigator.create_client(
+        GetParameters, "/controller_server/get_parameters"
+    )
+    if not client.wait_for_service(timeout_sec=timeout):
+        return None
+    request = GetParameters.Request()
+    request.names = [
+        "FollowPath.max_vel_x",
+        "FollowPath.max_speed_xy",
+        "FollowPath.max_vel_theta",
+    ]
+    response = _wait_parameter_future(
+        navigator, client.call_async(request), timeout
+    )
+    if response is None or len(response.values) != 3:
+        return None
+    values = [value.double_value for value in response.values]
+    if any(
+        value.type != ParameterType.PARAMETER_DOUBLE
+        for value in response.values
+    ):
+        return None
+    return dict(zip(request.names, values))
+
+
+def _set_controller_speeds(
+    navigator: BasicNavigator, values: dict, timeout: float
+) -> bool:
+    client = navigator.create_client(
+        SetParameters, "/controller_server/set_parameters"
+    )
+    if not client.wait_for_service(timeout_sec=timeout):
+        return False
+    request = SetParameters.Request()
+    for name, value in values.items():
+        parameter = Parameter()
+        parameter.name = name
+        parameter.value = ParameterValue(
+            type=ParameterType.PARAMETER_DOUBLE,
+            double_value=float(value),
+        )
+        request.parameters.append(parameter)
+    response = _wait_parameter_future(
+        navigator, client.call_async(request), timeout
+    )
+    return (
+        response is not None
+        and len(response.results) == len(request.parameters)
+        and all(result.successful for result in response.results)
+    )
 
 
 def _accept_or_align_shipping_pose(
@@ -1302,6 +1494,7 @@ def _navigate_to_shipping(
     lookup_timeout: float,
     correction_ratio: float = 0.5,
     max_correction_rounds: int = 3,
+    localization_monitor: Optional[_LoadedLocalizationMonitor] = None,
 ) -> ExitCode:
     """Navigate once to shipping and expose a bounded terminal result."""
     if timeout <= 0.0:
@@ -1325,6 +1518,14 @@ def _navigate_to_shipping(
             )
             return ExitCode.CANCELED
         rclpy.spin_once(navigator, timeout_sec=0.1)
+        if localization_monitor is not None:
+            localization_stable = localization_monitor.sample()
+            if localization_stable is False:
+                navigator.cancelTask()
+                navigator.get_logger().error(
+                    "shipping canceled: loaded localization jump detected"
+                )
+                return ExitCode.CANCELED
 
     result = navigator.getResult()
     exit_code = classify_task_result(result, TaskResult)
@@ -1548,6 +1749,61 @@ def _run_integrated_mission(
         )
         return ExitCode.UNKNOWN
 
+    localization_monitor = _LoadedLocalizationMonitor(
+        navigator,
+        args.odom_frame,
+        args.base_frame,
+        args.loaded_localization_max_position_jump,
+        args.loaded_localization_max_yaw_jump,
+    )
+    if not _wait_for_loaded_localization_stability(
+        navigator,
+        localization_monitor,
+        args.loaded_localization_samples,
+        args.loaded_localization_sample_interval,
+        args.shipping_pose_lookup_timeout,
+    ):
+        return ExitCode.UNKNOWN
+
+    original_speeds = _controller_speed_snapshot(
+        navigator, args.controller_parameter_timeout
+    )
+    if original_speeds is None:
+        navigator.get_logger().error(
+            "integrated mission stopped: controller speed snapshot failed"
+        )
+        return ExitCode.UNKNOWN
+    loaded_speeds = {
+        "FollowPath.max_vel_x": args.loaded_shipping_max_linear_speed,
+        "FollowPath.max_speed_xy": args.loaded_shipping_max_linear_speed,
+        "FollowPath.max_vel_theta": args.loaded_shipping_max_angular_speed,
+    }
+    if not _set_controller_speeds(
+        navigator, loaded_speeds, args.controller_parameter_timeout
+    ):
+        _set_controller_speeds(
+            navigator, original_speeds, args.controller_parameter_timeout
+        )
+        navigator.get_logger().error(
+            "integrated mission stopped: loaded speed limit rejected"
+        )
+        return ExitCode.UNKNOWN
+    if _controller_speed_snapshot(
+        navigator, args.controller_parameter_timeout
+    ) != loaded_speeds:
+        _set_controller_speeds(
+            navigator, original_speeds, args.controller_parameter_timeout
+        )
+        navigator.get_logger().error(
+            "integrated mission stopped: loaded speed readback mismatch"
+        )
+        return ExitCode.UNKNOWN
+    navigator.get_logger().info(
+        "LOADED_SHIPPING_SPEEDS_VERIFIED: "
+        f"linear={args.loaded_shipping_max_linear_speed:.3f} "
+        f"angular={args.loaded_shipping_max_angular_speed:.3f}"
+    )
+
     shipping_pose = _pose(
         navigator,
         args.frame_id,
@@ -1555,20 +1811,43 @@ def _run_integrated_mission(
         args.shipping_y,
         args.shipping_yaw,
     )
-    shipping_result = _navigate_to_shipping(
-        navigator,
-        shipping_pose,
-        args.shipping_timeout,
-        args.base_frame,
-        args.shipping_position_tolerance,
-        args.shipping_yaw_tolerance,
-        args.shipping_max_yaw_correction,
-        args.shipping_alignment_timeout,
-        args.shipping_alignment_settle,
-        args.shipping_pose_lookup_timeout,
-        args.shipping_yaw_correction_ratio,
-        args.shipping_yaw_correction_rounds,
-    )
+    speed_restore_verified = False
+    try:
+        shipping_result = _navigate_to_shipping(
+            navigator,
+            shipping_pose,
+            args.shipping_timeout,
+            args.base_frame,
+            args.shipping_position_tolerance,
+            args.shipping_yaw_tolerance,
+            args.shipping_max_yaw_correction,
+            args.shipping_alignment_timeout,
+            args.shipping_alignment_settle,
+            args.shipping_pose_lookup_timeout,
+            args.shipping_yaw_correction_ratio,
+            args.shipping_yaw_correction_rounds,
+            localization_monitor,
+        )
+    finally:
+        restored = _set_controller_speeds(
+            navigator, original_speeds, args.controller_parameter_timeout
+        )
+        restored_values = _controller_speed_snapshot(
+            navigator, args.controller_parameter_timeout
+        )
+        speed_restore_verified = (
+            restored and restored_values == original_speeds
+        )
+        if not speed_restore_verified:
+            navigator.get_logger().error(
+                "controller speed restoration verification failed"
+            )
+        else:
+            navigator.get_logger().info(
+                "CONTROLLER_SPEEDS_RESTORED"
+            )
+    if not speed_restore_verified:
+        return ExitCode.UNKNOWN
     if shipping_result != ExitCode.SUCCEEDED:
         return shipping_result
 

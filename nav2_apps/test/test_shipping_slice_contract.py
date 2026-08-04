@@ -318,6 +318,45 @@ def test_shipping_timeout_cancels_without_advancing(monkeypatch):
     )
 
 
+def test_shipping_localization_jump_cancels_before_completion(monkeypatch):
+    class Monitor:
+        def sample(self):
+            return False
+
+    navigator = FakeNavigator(False, None)
+    monkeypatch.setattr(
+        move_shelf_to_ship.rclpy,
+        "spin_once",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship.time,
+        "monotonic",
+        iter([100.0, 100.1]).__next__,
+    )
+
+    result = move_shelf_to_ship._navigate_to_shipping(
+        navigator,
+        PoseStamped(),
+        10.0,
+        "robot_base_footprint",
+        0.25,
+        0.10,
+        0.30,
+        15.0,
+        1.0,
+        5.0,
+        localization_monitor=Monitor(),
+    )
+
+    assert result == ExitCode.CANCELED
+    assert navigator.cancelled
+    assert any(
+        "localization jump" in message
+        for _level, message in navigator.logger.messages
+    )
+
+
 def test_shipping_pose_error_is_wrap_safe():
     transform = SimpleNamespace(
         transform=SimpleNamespace(

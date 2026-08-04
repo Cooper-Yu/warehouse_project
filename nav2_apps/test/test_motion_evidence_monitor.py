@@ -40,7 +40,13 @@ def test_phase_transitions_cover_navigation_and_shelf_events():
     assert phase == "LOADED_EGRESS"
     phase = phase_from_log("LOADED_EGRESS_COMPLETE", phase)
     assert phase == "SHIPPING_NAV_READY"
+    phase = phase_from_log("LOADED_LOCALIZATION_STABLE", phase)
+    assert phase == "LOCALIZATION_READY"
+    phase = phase_from_log("LOADED_SHIPPING_SPEEDS_VERIFIED", phase)
+    assert phase == "LOADED_SPEEDS_READY"
     phase = phase_from_log("Navigating to shipping_position: 1.98", phase)
+    assert phase == "NAV_TO_SHIPPING"
+    phase = phase_from_log("Navigating to goal: 1.985 0.924", phase)
     assert phase == "NAV_TO_SHIPPING"
     phase = phase_from_log("shipping_position goal succeeded", phase)
     assert phase == "AT_SHIPPING"
@@ -55,6 +61,8 @@ def test_phase_transitions_cover_navigation_and_shelf_events():
     phase = phase_from_log("unloaded_footprint_verified", phase)
     assert phase == "UNLOADED_FOOTPRINT_VERIFIED"
     phase = phase_from_log("Navigating to init_position: 0.0 0.0", phase)
+    assert phase == "NAV_TO_INIT"
+    phase = phase_from_log("Navigating to goal: 0.0 0.0", phase)
     assert phase == "NAV_TO_INIT"
     phase = phase_from_log("init_position goal succeeded", phase)
     assert phase == "AT_INIT"

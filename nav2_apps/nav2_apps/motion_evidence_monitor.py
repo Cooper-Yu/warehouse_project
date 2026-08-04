@@ -31,6 +31,10 @@ def yaw_from_quaternion(quaternion) -> float:
 def phase_from_log(message: str, current: str) -> str:
     """Map selected mission log messages to a compact evidence phase."""
     text = message.lower()
+    if "navigating to goal" in text:
+        if current in ("NAV_TO_SHIPPING", "NAV_TO_INIT"):
+            return current
+        return "NAV_TO_LOADING"
     transitions = (
         ("navigating to init_position", "NAV_TO_INIT"),
         ("init_position goal succeeded", "AT_INIT"),
@@ -38,12 +42,14 @@ def phase_from_log(message: str, current: str) -> str:
         ("shipping_position goal succeeded", "AT_SHIPPING"),
         ("loaded egress:", "LOADED_EGRESS"),
         ("loaded_egress_complete", "SHIPPING_NAV_READY"),
+        ("loaded_localization_stable", "LOCALIZATION_READY"),
+        ("loaded_shipping_speeds_verified", "LOADED_SPEEDS_READY"),
+        ("shipping canceled: loaded localization jump", "LOCALIZATION_ABORT"),
         ("published elevator-down", "ELEVATOR_DOWN"),
         ("lower_acceptance_pending", "LOWER_ACCEPTANCE_PENDING"),
         ("bounded shelf exit started", "SHELF_EXIT"),
         ("clear_of_shelf verified", "CLEAR_OF_SHELF"),
         ("unloaded_footprint_verified", "UNLOADED_FOOTPRINT_VERIFIED"),
-        ("navigating to goal", "NAV_TO_LOADING"),
         ("loading_position goal succeeded", "AT_LOADING"),
         ("mode=detection-only", "DETECTION_ONLY"),
         ("stepwise attach sample", "SHELF_APPROACH"),
