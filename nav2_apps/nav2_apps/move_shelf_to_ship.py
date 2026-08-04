@@ -158,6 +158,27 @@ def _parser() -> argparse.ArgumentParser:
         "--shipping-pose-lookup-timeout", type=float, default=5.0
     )
     parser.add_argument(
+        "--loaded-egress-initial-reverse", type=float, default=0.20
+    )
+    parser.add_argument(
+        "--loaded-egress-turn-yaw", type=float, default=0.12
+    )
+    parser.add_argument(
+        "--loaded-egress-final-reverse", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--loaded-egress-linear-speed", type=float, default=0.05
+    )
+    parser.add_argument(
+        "--loaded-egress-angular-speed", type=float, default=0.05
+    )
+    parser.add_argument(
+        "--loaded-egress-motion-timeout", type=float, default=20.0
+    )
+    parser.add_argument(
+        "--loaded-egress-yaw-tolerance", type=float, default=0.01
+    )
+    parser.add_argument(
         "--lower-only",
         action="store_true",
         help=(
@@ -216,9 +237,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--exit-distance", type=float, default=0.75)
     parser.add_argument("--exit-speed", type=float, default=0.05)
     parser.add_argument("--exit-timeout", type=float, default=40.0)
-    parser.add_argument("--clearance-refine-distance", type=float, default=0.02)
+    parser.add_argument(
+        "--clearance-refine-distance", type=float, default=0.02
+    )
     parser.add_argument("--clearance-refine-speed", type=float, default=0.03)
-    parser.add_argument("--clearance-refine-motion-timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--clearance-refine-motion-timeout", type=float, default=10.0
+    )
     parser.add_argument(
         "--confirm-exit-distance-complete", action="store_true"
     )
@@ -837,6 +862,7 @@ def _bounded_reverse_by_odom(
     lookup_timeout: float,
     heading_tolerance: float,
     lateral_tolerance: float,
+    motion_name: str = "shelf exit",
 ) -> bool:
     """Reverse a measured local-x distance with heading/lateral guards."""
     import tf2_ros
@@ -874,7 +900,7 @@ def _bounded_reverse_by_odom(
                 break
         if start is None:
             navigator.get_logger().error(
-                "bounded shelf exit rejected: odom TF unavailable"
+                f"bounded {motion_name} rejected: odom TF unavailable"
             )
             return False
 
@@ -887,7 +913,7 @@ def _bounded_reverse_by_odom(
         reverse_progress = 0.0
         lateral = 0.0
         navigator.get_logger().info(
-            "bounded shelf exit started: "
+            f"bounded {motion_name} started: "
             f"target_distance={distance:.3f} speed={command.linear.x:.3f} "
             f"accepted_odom_yaw={start_yaw:.3f}"
         )
@@ -898,7 +924,7 @@ def _bounded_reverse_by_odom(
             if current is None:
                 if time.monotonic() - last_tf_time >= lookup_timeout:
                     navigator.get_logger().error(
-                        "bounded shelf exit stopped: odom TF stale"
+                        f"bounded {motion_name} stopped: odom TF stale"
                     )
                     return False
                 publisher.publish(command)
@@ -916,20 +942,20 @@ def _bounded_reverse_by_odom(
             heading_drift = _normalize_angle(current_yaw - start_yaw)
             if abs(heading_drift) > heading_tolerance:
                 navigator.get_logger().error(
-                    "bounded shelf exit stopped: heading drift "
+                    f"bounded {motion_name} stopped: heading drift "
                     f"{heading_drift:.3f} exceeds "
                     f"{heading_tolerance:.3f}"
                 )
                 return False
             if abs(lateral) > lateral_tolerance:
                 navigator.get_logger().error(
-                    "bounded shelf exit stopped: lateral drift "
+                    f"bounded {motion_name} stopped: lateral drift "
                     f"{lateral:.3f} exceeds {lateral_tolerance:.3f}"
                 )
                 return False
             if reverse_progress >= distance:
                 navigator.get_logger().info(
-                    "bounded shelf exit odom target complete: "
+                    f"bounded {motion_name} odom target complete: "
                     f"target={distance:.3f} "
                     f"reverse_progress={reverse_progress:.3f} "
                     f"lateral={lateral:.3f} "
@@ -939,7 +965,7 @@ def _bounded_reverse_by_odom(
             publisher.publish(command)
 
         navigator.get_logger().error(
-            "bounded shelf exit timed out before odom target: "
+            f"bounded {motion_name} timed out before odom target: "
             f"target={distance:.3f} progress={reverse_progress:.3f}"
         )
         return False
@@ -950,6 +976,164 @@ def _bounded_reverse_by_odom(
             time.sleep(0.05)
         navigator.destroy_publisher(publisher)
         del listener
+
+
+def _bounded_rotate_by_odom(
+    navigator: BasicNavigator,
+    cmd_vel_topic: str,
+    odom_frame: str,
+    base_frame: str,
+    yaw: float,
+    speed: float,
+    timeout: float,
+    lookup_timeout: float,
+    yaw_tolerance: float,
+) -> bool:
+    """Rotate through a measured signed yaw and stop fail-closed."""
+    import tf2_ros
+
+    target = abs(yaw)
+    if (
+        target <= 0.0
+        or speed <= 0.0
+        or timeout <= 0.0
+        or lookup_timeout <= 0.0
+        or yaw_tolerance < 0.0
+    ):
+        navigator.get_logger().error("invalid loaded-egress turn parameters")
+        return False
+
+    publisher = navigator.create_publisher(Twist, cmd_vel_topic, 10)
+    buffer = tf2_ros.Buffer()
+    listener = tf2_ros.TransformListener(buffer, navigator, spin_thread=False)
+    deadline = time.monotonic() + timeout
+
+    def lookup():
+        try:
+            return buffer.lookup_transform(
+                odom_frame, base_frame, rclpy.time.Time()
+            )
+        except tf2_ros.TransformException:
+            return None
+
+    start = None
+    try:
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            start = lookup()
+            if start is not None:
+                break
+        if start is None:
+            navigator.get_logger().error(
+                "loaded-egress turn rejected: odom TF unavailable"
+            )
+            return False
+
+        direction = math.copysign(1.0, yaw)
+        last_yaw = _yaw_from_rotation(start.transform.rotation)
+        traveled = 0.0
+        last_tf_time = time.monotonic()
+        command = Twist()
+        command.angular.z = direction * speed
+        navigator.get_logger().info(
+            "bounded loaded-egress turn started: "
+            f"target_yaw={yaw:.3f} speed={command.angular.z:.3f}"
+        )
+
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            current = lookup()
+            if current is None:
+                if time.monotonic() - last_tf_time >= lookup_timeout:
+                    navigator.get_logger().error(
+                        "loaded-egress turn stopped: odom TF stale"
+                    )
+                    return False
+                publisher.publish(command)
+                continue
+
+            last_tf_time = time.monotonic()
+            current_yaw = _yaw_from_rotation(current.transform.rotation)
+            delta = _normalize_angle(current_yaw - last_yaw)
+            last_yaw = current_yaw
+            traveled += direction * delta
+            if traveled >= max(0.0, target - yaw_tolerance):
+                navigator.get_logger().info(
+                    "bounded loaded-egress turn complete: "
+                    f"target={yaw:.3f} traveled={direction * traveled:.3f}"
+                )
+                return True
+            publisher.publish(command)
+
+        navigator.get_logger().error(
+            "loaded-egress turn timed out before odom target: "
+            f"target={yaw:.3f} traveled={direction * traveled:.3f}"
+        )
+        return False
+    finally:
+        stop = Twist()
+        for _ in range(3):
+            publisher.publish(stop)
+            time.sleep(0.05)
+        navigator.destroy_publisher(publisher)
+        del listener
+
+
+def _loaded_egress_before_shipping(
+    navigator: BasicNavigator, args: argparse.Namespace
+) -> bool:
+    """Create loaded rotation clearance before handing motion to Nav2."""
+    navigator.get_logger().info(
+        "loaded egress: reverse -> left turn -> reverse before shipping"
+    )
+    if not _bounded_reverse_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        args.loaded_egress_initial_reverse,
+        args.loaded_egress_linear_speed,
+        args.loaded_egress_motion_timeout,
+        args.odom_lookup_timeout,
+        args.exit_heading_tolerance,
+        args.exit_lateral_tolerance,
+        "loaded egress initial reverse",
+    ):
+        return False
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
+    if not _bounded_rotate_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        args.loaded_egress_turn_yaw,
+        args.loaded_egress_angular_speed,
+        args.loaded_egress_motion_timeout,
+        args.odom_lookup_timeout,
+        args.loaded_egress_yaw_tolerance,
+    ):
+        return False
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
+    if not _bounded_reverse_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        args.loaded_egress_final_reverse,
+        args.loaded_egress_linear_speed,
+        args.loaded_egress_motion_timeout,
+        args.odom_lookup_timeout,
+        args.exit_heading_tolerance,
+        args.exit_lateral_tolerance,
+        "loaded egress final reverse",
+    ):
+        return False
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
+    navigator.get_logger().info("LOADED_EGRESS_COMPLETE")
+    return True
 
 
 def _settle_without_motion(
@@ -1357,6 +1541,11 @@ def _run_integrated_mission(
         args.footprint_timeout,
         args.footprint_edge_tolerance,
     ):
+        return ExitCode.UNKNOWN
+    if not _loaded_egress_before_shipping(navigator, args):
+        navigator.get_logger().error(
+            "integrated mission stopped before shipping: loaded egress failed"
+        )
         return ExitCode.UNKNOWN
 
     shipping_pose = _pose(

@@ -38,6 +38,11 @@ def test_no_mission_flags_selects_integrated_course_route():
 
     assert not any(operation_modes)
     assert args.shipping_refine_distance == 0.16
+    assert args.loaded_egress_initial_reverse == 0.20
+    assert args.loaded_egress_turn_yaw == 0.12
+    assert args.loaded_egress_final_reverse == 0.25
+    assert args.loaded_egress_linear_speed == 0.05
+    assert args.loaded_egress_angular_speed == 0.05
     assert args.exit_distance == 0.75
     assert args.clearance_refine_distance == 0.02
     assert args.clearance_x == 0.36
@@ -52,6 +57,7 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
     expected_calls = [
         "_request_stepwise_attach",
         "_apply_loaded_footprint_verified",
+        "_loaded_egress_before_shipping",
         "_navigate_to_shipping",
         "_bounded_forward_by_odom",
         "_publish_elevator_down_and_wait",
@@ -64,6 +70,37 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
     assert "integrated_mode = not any(operation_modes)" in source
     assert "integrated simulation mission will initialize AMCL" not in source
     assert "_wait_for_existing_localization" in source
+
+
+def test_loaded_egress_is_bounded_and_ordered_before_shipping():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    egress = _function(tree, "_loaded_egress_before_shipping")
+    egress_source = ast.get_source_segment(source, egress)
+
+    first_reverse = egress_source.index("_bounded_reverse_by_odom")
+    turn = egress_source.index("_bounded_rotate_by_odom")
+    second_reverse = egress_source.rindex("_bounded_reverse_by_odom")
+
+    assert first_reverse < turn < second_reverse
+    assert egress_source.count("_bounded_reverse_by_odom") == 2
+    assert egress_source.count("_settle_without_motion") == 3
+    assert '"loaded egress initial reverse"' in egress_source
+    assert '"loaded egress final reverse"' in egress_source
+    assert "LOADED_EGRESS_COMPLETE" in egress_source
+
+
+def test_loaded_egress_turn_uses_signed_odom_accumulation_and_stops():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    turn = _function(tree, "_bounded_rotate_by_odom")
+    turn_source = ast.get_source_segment(source, turn)
+
+    assert "direction = math.copysign(1.0, yaw)" in turn_source
+    assert "delta = _normalize_angle(current_yaw - last_yaw)" in turn_source
+    assert "command.angular.z = direction * speed" in turn_source
+    assert "finally:" in turn_source
+    assert "publisher.publish(stop)" in turn_source
 
 
 def test_integrated_exit_allows_only_one_clearance_refinement():

@@ -36,6 +36,8 @@ def phase_from_log(message: str, current: str) -> str:
         ("init_position goal succeeded", "AT_INIT"),
         ("navigating to shipping_position", "NAV_TO_SHIPPING"),
         ("shipping_position goal succeeded", "AT_SHIPPING"),
+        ("loaded egress:", "LOADED_EGRESS"),
+        ("loaded_egress_complete", "SHIPPING_NAV_READY"),
         ("published elevator-down", "ELEVATOR_DOWN"),
         ("lower_acceptance_pending", "LOWER_ACCEPTANCE_PENDING"),
         ("bounded shelf exit started", "SHELF_EXIT"),
