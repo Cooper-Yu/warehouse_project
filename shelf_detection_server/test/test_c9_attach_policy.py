@@ -69,6 +69,14 @@ class _AlignmentHarness:
             "alignment_standoff_distance": 1.0,
             "alignment_position_tolerance": 0.08,
             "center_lateral_tolerance": 0.08,
+            "lateral_execution_enabled": False,
+            "lateral_correction_ratio": 0.50,
+            "lateral_temporary_yaw": math.pi / 6.0,
+            "lateral_max_abs_yaw": 0.55,
+            "lateral_max_drive_distance": 0.20,
+            "lateral_rotate_speed": 0.05,
+            "lateral_drive_speed": 0.05,
+            "lateral_clearance_min_range": 0.90,
             "alignment_max_drive_distance": 0.75,
             "alignment_max_travel_yaw": 1.20,
             "alignment_short_drive_distance": 0.20,
@@ -145,6 +153,22 @@ class _AlignmentHarness:
             self, target, deadline
         )
 
+    def _lateral_clearance_accepted(self, target):
+        from shelf_detection_server.server import ShelfDetectionServer
+
+        return ShelfDetectionServer._lateral_clearance_accepted(
+            self, target
+        )
+
+    def _lateral_action_clearance_accepted(
+        self, target, signed_yaw, drive_distance
+    ):
+        from shelf_detection_server.server import ShelfDetectionServer
+
+        return ShelfDetectionServer._lateral_action_clearance_accepted(
+            self, target, signed_yaw, drive_distance
+        )
+
 
 def test_c9_policy_parameters_are_declared():
     tree = _server_tree()
@@ -191,6 +215,16 @@ def test_c9_policy_parameters_are_declared():
     assert declared["alignment_required_consecutive_samples"] == 2
     assert declared["final_drive_distance"] == pytest.approx(0.3703)
     assert declared["entry_odom_yaw_tolerance"] == 0.03
+    assert declared["lateral_execution_enabled"] is False
+    assert declared["lateral_correction_ratio"] == 0.50
+    assert declared["lateral_temporary_yaw"] == pytest.approx(
+        math.pi / 6.0
+    )
+    assert declared["lateral_max_abs_yaw"] == 0.55
+    assert declared["lateral_max_drive_distance"] == 0.20
+    assert declared["lateral_rotate_speed"] == 0.05
+    assert declared["lateral_drive_speed"] == 0.05
+    assert declared["lateral_clearance_min_range"] == 0.90
 
 
 def test_attach_loop_contains_center_lock_and_recovery_paths():
@@ -558,6 +592,110 @@ def test_alignment_exhaustion_stops_and_blocks_attach_elevator():
     )
     assert not attached
     assert harness.elevator_count == 0
+
+
+def test_lateral_executor_feature_disabled_preserves_existing_staging():
+    aligned_target = ("base", 1.0, 0.0, 0.0)
+    harness = _AlignmentHarness(
+        [aligned_target, aligned_target],
+        stable_yaws=[0.0, 0.0, 0.0, 0.0, 3.053559, 3.053559],
+    )
+    lateral_calls = []
+    harness._execute_lateral_action = lambda *args: (
+        lateral_calls.append(args) or aligned_target
+    )
+
+    result = harness._align_at_safe_standoff(
+        ("base", 1.10, 0.12, 0.0),
+        time.monotonic() + 10.0,
+    )
+
+    assert result == (aligned_target, harness.accepted_odom_yaw)
+    assert lateral_calls == []
+    assert harness.drives
+
+
+def test_lateral_execution_gate_rejection_creates_no_motion():
+    harness = _AlignmentHarness([], stable_yaws=[0.0])
+    harness.parameters["lateral_execution_enabled"] = True
+    harness.parameters["lateral_max_drive_distance"] = 0.10
+    lateral_calls = []
+    harness._execute_lateral_action = lambda *args: lateral_calls.append(args)
+
+    result = harness._align_at_safe_standoff(
+        ("base", 1.0, 0.20, 0.0),
+        time.monotonic() + 10.0,
+    )
+
+    assert result is None
+    assert lateral_calls == []
+    assert harness.rotations == []
+    assert harness.drives == []
+    assert harness.stop_count == 1
+
+
+def test_lateral_clearance_rejection_creates_no_motion():
+    harness = _AlignmentHarness([], stable_yaws=[0.0])
+    harness.parameters["lateral_execution_enabled"] = True
+    lateral_calls = []
+    harness._execute_lateral_action = lambda *args: lateral_calls.append(args)
+
+    result = harness._align_at_safe_standoff(
+        ("base", 0.80, 0.20, 0.0),
+        time.monotonic() + 10.0,
+    )
+
+    assert result is None
+    assert lateral_calls == []
+    assert harness.rotations == []
+    assert harness.drives == []
+    assert harness.stop_count == 1
+
+
+def test_lateral_execution_remains_bounded_by_correction_budget():
+    unchanged_target = ("base", 1.20, 0.18, 0.0)
+    harness = _AlignmentHarness(
+        [],
+        retry_count=1,
+        stable_yaws=[0.0],
+    )
+    harness.parameters["lateral_execution_enabled"] = True
+    lateral_calls = []
+
+    def execute(*args):
+        lateral_calls.append(args)
+        return unchanged_target
+
+    harness._execute_lateral_action = execute
+
+    result = harness._align_at_safe_standoff(
+        unchanged_target,
+        time.monotonic() + 10.0,
+    )
+
+    assert result is None
+    assert len(lateral_calls) == 1
+    assert harness.rotations == []
+    assert harness.drives == []
+    assert harness.stop_count == 1
+
+
+def test_lateral_predicted_endpoint_rejection_creates_no_motion():
+    harness = _AlignmentHarness([], stable_yaws=[0.0])
+    harness.parameters["lateral_execution_enabled"] = True
+    lateral_calls = []
+    harness._execute_lateral_action = lambda *args: lateral_calls.append(args)
+
+    result = harness._align_at_safe_standoff(
+        ("base", 1.0, 0.18, 0.0),
+        time.monotonic() + 10.0,
+    )
+
+    assert result is None
+    assert lateral_calls == []
+    assert harness.rotations == []
+    assert harness.drives == []
+    assert harness.stop_count == 1
 
 
 def test_final_correction_keeps_bounded_fresh_acceptance_observations():

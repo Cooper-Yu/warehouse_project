@@ -24,10 +24,21 @@ from tf2_ros import (
 from warehouse_interfaces.srv import GoToLoading
 
 from shelf_detection_server.lateral_center_policy import (
+    LateralDecision,
     classify_lateral_center,
 )
 from shelf_detection_server.lateral_center_state import (
     next_state_from_decision,
+)
+from shelf_detection_server.lateral_execution_gate import (
+    plan_lateral_action_if_safe,
+)
+from shelf_detection_server.lateral_execution_state import (
+    LateralExecutionEvidence,
+    accept_clearance_if_ready,
+    invalidate_on_action_start,
+    record_fresh_observation,
+    restore_stopped_after_settle,
 )
 from shelf_detection_server.leg_geometry import (
     LegPairMeasurement,
@@ -182,6 +193,16 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("forward_step_distance", 0.20)
         self.declare_parameter("center_distance_tolerance", 0.20)
         self.declare_parameter("center_lateral_tolerance", 0.08)
+        # The executor remains opt-in until a separate simulation runtime
+        # gate accepts the connected motion path.
+        self.declare_parameter("lateral_execution_enabled", False)
+        self.declare_parameter("lateral_correction_ratio", 0.50)
+        self.declare_parameter("lateral_temporary_yaw", 0.5235987756)
+        self.declare_parameter("lateral_max_abs_yaw", 0.55)
+        self.declare_parameter("lateral_max_drive_distance", 0.20)
+        self.declare_parameter("lateral_rotate_speed", 0.05)
+        self.declare_parameter("lateral_drive_speed", 0.05)
+        self.declare_parameter("lateral_clearance_min_range", 0.90)
         self.declare_parameter("center_lock_distance", 0.35)
         self.declare_parameter("center_lock_min_steps", 2)
         self.declare_parameter("center_drive_scale", 1.0)
@@ -897,6 +918,161 @@ class ShelfDetectionServer(Node):
         )
         return None
 
+    def _lateral_clearance_accepted(self, target: tuple) -> bool:
+        """Accept the current fresh geometry only in the standoff zone."""
+        _, x, y, shelf_heading = target
+        minimum_range = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "lateral_clearance_min_range"
+                ).value
+            ),
+        )
+        maximum_heading = max(
+            0.0,
+            float(self.get_parameter("max_detected_yaw").value),
+        )
+        return (
+            all(math.isfinite(value) for value in (x, y, shelf_heading))
+            and math.hypot(x, y) >= minimum_range
+            and abs(shelf_heading) <= maximum_heading
+        )
+
+    def _lateral_action_clearance_accepted(
+        self,
+        target: tuple,
+        signed_yaw: float,
+        drive_distance: float,
+    ) -> bool:
+        """Reject a candidate whose predicted endpoint is too close."""
+        if not self._lateral_clearance_accepted(target):
+            return False
+        _, x, y, _ = target
+        values = (signed_yaw, drive_distance)
+        if (
+            not all(math.isfinite(value) for value in values)
+            or drive_distance < 0.0
+        ):
+            return False
+        minimum_range = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "lateral_clearance_min_range"
+                ).value
+            ),
+        )
+        predicted_x = x - drive_distance * math.cos(signed_yaw)
+        predicted_y = y - drive_distance * math.sin(signed_yaw)
+        return math.hypot(predicted_x, predicted_y) >= minimum_range
+
+    def _settle_and_refresh_lateral(
+        self,
+        evidence: LateralExecutionEvidence,
+        scan_before_motion: int,
+        deadline: float,
+    ) -> Optional[tuple]:
+        """Rebuild stopped/fresh/clearance evidence after one action."""
+        self._publish_stop()
+        if self._wait_for_stable_odom_yaw(deadline) is None:
+            self.get_logger().error(
+                "lateral-centering stopped: odom did not settle"
+            )
+            return None
+        evidence = restore_stopped_after_settle(evidence)
+        target = self._recover_cart_frame_after_motion(
+            scan_before_motion, deadline
+        )
+        if target is None:
+            self.get_logger().error(
+                "lateral-centering stopped: fresh geometry unavailable"
+            )
+            return None
+        evidence = record_fresh_observation(evidence)
+        if self._lateral_clearance_accepted(target):
+            evidence = accept_clearance_if_ready(evidence)
+        if not (
+            evidence.observation_fresh
+            and evidence.clearance_accepted
+            and evidence.robot_stopped
+        ):
+            self.get_logger().error(
+                "lateral-centering stopped: fresh clearance rejected"
+            )
+            return None
+        return target, evidence
+
+    def _execute_lateral_action(
+        self,
+        initial_target: tuple,
+        signed_yaw: float,
+        drive_distance: float,
+        entry_odom_yaw: float,
+        deadline: float,
+    ) -> Optional[tuple]:
+        """Execute one bounded turn-drive-restore lateral correction."""
+        evidence = LateralExecutionEvidence(True, True, True)
+        target = initial_target
+        rotate_speed = max(
+            0.0,
+            float(self.get_parameter("lateral_rotate_speed").value),
+        )
+        drive_speed = max(
+            0.0,
+            float(self.get_parameter("lateral_drive_speed").value),
+        )
+
+        scan_before_motion = self._current_scan_sequence()
+        evidence = invalidate_on_action_start(evidence)
+        if not self._rotate_measured(
+            signed_yaw, deadline, rotate_speed
+        ):
+            return None
+        refreshed = self._settle_and_refresh_lateral(
+            evidence, scan_before_motion, deadline
+        )
+        if refreshed is None:
+            return None
+        target, evidence = refreshed
+
+        scan_before_motion = self._current_scan_sequence()
+        evidence = invalidate_on_action_start(evidence)
+        if not self._drive_forward_measured(
+            drive_distance, deadline, drive_speed
+        ):
+            return None
+        refreshed = self._settle_and_refresh_lateral(
+            evidence, scan_before_motion, deadline
+        )
+        if refreshed is None:
+            return None
+        target, evidence = refreshed
+
+        current_yaw = self._wait_for_stable_odom_yaw(deadline)
+        if current_yaw is None:
+            return None
+        restore_yaw = normalize_angle(entry_odom_yaw - current_yaw)
+        scan_before_motion = self._current_scan_sequence()
+        evidence = invalidate_on_action_start(evidence)
+        if abs(restore_yaw) > 0.0 and not self._rotate_measured(
+            restore_yaw, deadline, rotate_speed
+        ):
+            return None
+        refreshed = self._settle_and_refresh_lateral(
+            evidence, scan_before_motion, deadline
+        )
+        if refreshed is None:
+            return None
+        target, _evidence = refreshed
+        self.get_logger().info(
+            "lateral-centering bounded action complete: "
+            f"yaw={signed_yaw:.3f} "
+            f"distance={drive_distance:.3f} "
+            f"restore_yaw={restore_yaw:.3f}"
+        )
+        return target
+
     def _align_at_safe_standoff(
         self, initial_target: tuple, deadline: float
     ) -> Optional[tuple]:
@@ -921,6 +1097,9 @@ class ShelfDetectionServer(Node):
             float(
                 self.get_parameter("center_lateral_tolerance").value
             ),
+        )
+        lateral_execution_enabled = bool(
+            self.get_parameter("lateral_execution_enabled").value
         )
         max_drive = max(
             0.0,
@@ -1031,6 +1210,85 @@ class ShelfDetectionServer(Node):
                 f"shelf_normal_yaw={shelf_heading:.3f} "
                 f"staging_error={position_error:.3f}"
             )
+
+            if (
+                lateral_execution_enabled
+                and lateral_decision
+                in (
+                    LateralDecision.SHIFT_LEFT,
+                    LateralDecision.SHIFT_RIGHT,
+                )
+            ):
+                aligned_samples = 0
+                if correction_count >= retry_count:
+                    self.get_logger().error(
+                        "lateral-centering stopped: correction budget "
+                        "exhausted"
+                    )
+                    break
+                stopped_yaw = self._wait_for_stable_odom_yaw(deadline)
+                clearance_accepted = self._lateral_clearance_accepted(
+                    target
+                )
+                plan = plan_lateral_action_if_safe(
+                    observation_fresh=observation_fresh,
+                    clearance_accepted=clearance_accepted,
+                    robot_stopped=stopped_yaw is not None,
+                    lateral_error=error_y,
+                    correction_ratio=float(
+                        self.get_parameter(
+                            "lateral_correction_ratio"
+                        ).value
+                    ),
+                    temporary_yaw=float(
+                        self.get_parameter(
+                            "lateral_temporary_yaw"
+                        ).value
+                    ),
+                    max_abs_yaw=float(
+                        self.get_parameter("lateral_max_abs_yaw").value
+                    ),
+                    max_drive_distance=float(
+                        self.get_parameter(
+                            "lateral_max_drive_distance"
+                        ).value
+                    ),
+                )
+                if plan is None or stopped_yaw is None:
+                    self._publish_stop()
+                    self.get_logger().error(
+                        "lateral-centering stopped: execution gate "
+                        "rejected the candidate"
+                    )
+                    return None
+                if not self._lateral_action_clearance_accepted(
+                    target,
+                    plan.signed_yaw,
+                    plan.drive_distance,
+                ):
+                    self._publish_stop()
+                    self.get_logger().error(
+                        "lateral-centering stopped: predicted endpoint "
+                        "clearance rejected"
+                    )
+                    return None
+                correction_count += 1
+                self.get_logger().info(
+                    "lateral-centering bounded action selected: "
+                    f"yaw={plan.signed_yaw:.3f} "
+                    f"distance={plan.drive_distance:.3f} "
+                    f"correction={correction_count}/{retry_count}"
+                )
+                target = self._execute_lateral_action(
+                    target,
+                    plan.signed_yaw,
+                    plan.drive_distance,
+                    stopped_yaw,
+                    deadline,
+                )
+                if target is None:
+                    return None
+                continue
 
             scan_before_motion = self._current_scan_sequence()
             if position_error > position_tolerance:

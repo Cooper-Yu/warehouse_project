@@ -54,18 +54,20 @@ def test_shadow_log_contains_minimum_explainable_fields():
         assert field in source
 
 
-def test_shadow_outputs_do_not_control_branches_or_returns():
+def test_lateral_outputs_only_control_opt_in_execution_branch():
     alignment = _function(_server_tree(), "_align_at_safe_standoff")
     controlled_names = {"lateral_decision", "lateral_state"}
+    controlling_branches = []
 
     for node in ast.walk(alignment):
-        if isinstance(node, (ast.If, ast.While)):
+        if isinstance(node, ast.If):
             used = {
                 child.id
                 for child in ast.walk(node.test)
                 if isinstance(child, ast.Name)
             }
-            assert controlled_names.isdisjoint(used)
+            if not controlled_names.isdisjoint(used):
+                controlling_branches.append(node)
         if isinstance(node, ast.Return) and node.value is not None:
             used = {
                 child.id
@@ -74,8 +76,17 @@ def test_shadow_outputs_do_not_control_branches_or_returns():
             }
             assert controlled_names.isdisjoint(used)
 
+    assert len(controlling_branches) == 1
+    gate_names = {
+        child.id
+        for child in ast.walk(controlling_branches[0].test)
+        if isinstance(child, ast.Name)
+    }
+    assert "lateral_execution_enabled" in gate_names
+    assert "lateral_decision" in gate_names
 
-def test_shadow_outputs_are_not_passed_to_motion_helpers():
+
+def test_lateral_outputs_are_not_passed_directly_to_motion_helpers():
     alignment = _function(_server_tree(), "_align_at_safe_standoff")
     motion_helpers = {"_rotate_measured", "_drive_forward_measured"}
 
@@ -93,3 +104,15 @@ def test_shadow_outputs_are_not_passed_to_motion_helpers():
         }
         assert "lateral_decision" not in used
         assert "lateral_state" not in used
+
+
+def test_safe_standoff_delegates_opt_in_motion_to_one_executor():
+    alignment = _function(_server_tree(), "_align_at_safe_standoff")
+    calls = {
+        node.func.attr
+        for node in ast.walk(alignment)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+    }
+
+    assert "_execute_lateral_action" in calls
