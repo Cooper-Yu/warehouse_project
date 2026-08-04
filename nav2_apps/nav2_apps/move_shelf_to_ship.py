@@ -8,7 +8,9 @@ from typing import List, Optional
 
 import rclpy
 from geometry_msgs.msg import PoseStamped, Twist
+from nav2_msgs.action import ComputePathToPose
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+from action_msgs.msg import GoalStatus
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.utilities import remove_ros_args
@@ -198,6 +200,20 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-prealign-max-localization-confirmations",
         type=int,
         default=1,
+    )
+    parser.add_argument(
+        "--loaded-prealign-path-probe-timeout", type=float, default=5.0
+    )
+    parser.add_argument(
+        "--loaded-prealign-path-end-tolerance", type=float, default=0.55
+    )
+    parser.add_argument(
+        "--loaded-prealign-path-handoff-max-bearing",
+        type=float,
+        default=0.60,
+    )
+    parser.add_argument(
+        "--loaded-prealign-planner-id", default="GridBased"
     )
     parser.add_argument(
         "--loaded-localization-samples", type=int, default=5
@@ -756,6 +772,112 @@ def _prealign_localization_reconfirmation_allowed(
         <= max_confirmable_position_jump
         and monitor.last_yaw_jump <= strict_yaw_jump
     )
+
+
+def _path_reaches_goal(path, frame_id: str, goal, tolerance: float) -> bool:
+    """Validate a current finite planner result before motion handoff."""
+    if tolerance < 0.0 or path.header.frame_id != frame_id:
+        return False
+    if len(path.poses) < 2:
+        return False
+    for pose in (path.poses[0].pose.position, path.poses[-1].pose.position):
+        if not all(math.isfinite(value) for value in (pose.x, pose.y, pose.z)):
+            return False
+    endpoint = path.poses[-1].pose.position
+    return (
+        math.hypot(endpoint.x - goal.pose.position.x,
+                   endpoint.y - goal.pose.position.y)
+        <= tolerance
+    )
+
+
+def _bounded_loaded_shipping_path_probe(
+    navigator: BasicNavigator,
+    goal: PoseStamped,
+    planner_id: str,
+    timeout: float,
+    endpoint_tolerance: float,
+) -> Optional[bool]:
+    """Return True for a valid path, False for no path, None if uncertain."""
+    if timeout <= 0.0 or endpoint_tolerance < 0.0 or not planner_id:
+        navigator.get_logger().error("invalid loaded path probe parameters")
+        return None
+    deadline = time.monotonic() + timeout
+    client = navigator.compute_path_to_pose_client
+    while rclpy.ok() and time.monotonic() < deadline:
+        if client.wait_for_server(timeout_sec=0.1):
+            break
+    else:
+        navigator.get_logger().error(
+            "loaded shipping path probe timed out waiting for planner"
+        )
+        return None
+
+    request = ComputePathToPose.Goal()
+    request.goal = goal
+    request.planner_id = planner_id
+    request.use_start = False
+    send_future = client.send_goal_async(request)
+    while (
+        rclpy.ok()
+        and not send_future.done()
+        and time.monotonic() < deadline
+    ):
+        rclpy.spin_once(navigator, timeout_sec=0.1)
+    if not send_future.done() or send_future.result() is None:
+        navigator.get_logger().error(
+            "loaded shipping path probe timed out before goal acceptance"
+        )
+        return None
+    goal_handle = send_future.result()
+    if not goal_handle.accepted:
+        navigator.get_logger().warning(
+            "loaded shipping path probe rejected by planner"
+        )
+        return False
+
+    result_future = goal_handle.get_result_async()
+    while (
+        rclpy.ok()
+        and not result_future.done()
+        and time.monotonic() < deadline
+    ):
+        rclpy.spin_once(navigator, timeout_sec=0.1)
+    if not result_future.done():
+        cancel_future = goal_handle.cancel_goal_async()
+        cancel_deadline = time.monotonic() + 1.0
+        while (
+            rclpy.ok()
+            and not cancel_future.done()
+            and time.monotonic() < cancel_deadline
+        ):
+            rclpy.spin_once(navigator, timeout_sec=0.1)
+        navigator.get_logger().error(
+            "loaded shipping path probe timed out; cancel requested"
+        )
+        return None
+
+    wrapped_result = result_future.result()
+    if (
+        wrapped_result is None
+        or wrapped_result.status != GoalStatus.STATUS_SUCCEEDED
+    ):
+        navigator.get_logger().info(
+            "loaded shipping path probe found no current path"
+        )
+        return False
+    path = wrapped_result.result.path
+    if not _path_reaches_goal(
+        path, goal.header.frame_id, goal, endpoint_tolerance
+    ):
+        navigator.get_logger().warning(
+            "loaded shipping path probe returned an invalid path"
+        )
+        return False
+    navigator.get_logger().info(
+        f"LOADED_SHIPPING_PATH_READY: poses={len(path.poses)}"
+    )
+    return True
 
 
 def _wait_parameter_future(navigator, future, timeout: float):
@@ -1404,6 +1526,10 @@ def _prealign_loaded_shipping_bearing(
         or max_confirmable_jump
         <= args.loaded_localization_max_position_jump
         or max_confirmations < 0
+        or args.loaded_prealign_path_probe_timeout <= 0.0
+        or args.loaded_prealign_path_end_tolerance < 0.0
+        or args.loaded_prealign_path_handoff_max_bearing < tolerance
+        or not args.loaded_prealign_planner_id
     ):
         navigator.get_logger().error(
             "invalid loaded shipping prealignment parameters"
@@ -1432,6 +1558,43 @@ def _prealign_loaded_shipping_bearing(
             args.shipping_x - current_x,
         )
         error = _normalize_angle(bearing - current_yaw)
+        shipping_pose = _pose(
+            navigator,
+            args.frame_id,
+            args.shipping_x,
+            args.shipping_y,
+            args.shipping_yaw,
+        )
+        path_ready = _bounded_loaded_shipping_path_probe(
+            navigator,
+            shipping_pose,
+            args.loaded_prealign_planner_id,
+            args.loaded_prealign_path_probe_timeout,
+            args.loaded_prealign_path_end_tolerance,
+        )
+        if (
+            path_ready is True
+            and abs(error)
+            <= args.loaded_prealign_path_handoff_max_bearing
+        ):
+            navigator.get_logger().info(
+                "LOADED_SHIPPING_PREALIGN_COMPLETE: planner handoff "
+                f"remaining_bearing_error={error:.3f} "
+                f"requested_total={requested_total:.3f}"
+            )
+            return True
+        if path_ready is True:
+            navigator.get_logger().info(
+                "loaded shipping path ready but bearing remains outside "
+                "bounded handoff: "
+                f"error={error:.3f} max="
+                f"{args.loaded_prealign_path_handoff_max_bearing:.3f}"
+            )
+        if path_ready is None:
+            navigator.get_logger().error(
+                "loaded shipping prealignment stopped: path probe uncertain"
+            )
+            return False
         if abs(error) <= tolerance:
             navigator.get_logger().info(
                 "LOADED_SHIPPING_PREALIGN_COMPLETE: "

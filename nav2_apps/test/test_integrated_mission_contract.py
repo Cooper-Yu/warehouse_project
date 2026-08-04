@@ -1,6 +1,7 @@
 import ast
 from pathlib import Path
 
+from geometry_msgs.msg import PoseStamped
 from nav2_apps import move_shelf_to_ship
 
 
@@ -48,6 +49,10 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_prealign_bearing_tolerance == 0.20
     assert args.loaded_prealign_max_confirmable_position_jump == 0.23
     assert args.loaded_prealign_max_localization_confirmations == 1
+    assert args.loaded_prealign_path_probe_timeout == 5.0
+    assert args.loaded_prealign_path_end_tolerance == 0.55
+    assert args.loaded_prealign_path_handoff_max_bearing == 0.60
+    assert args.loaded_prealign_planner_id == "GridBased"
     assert args.loaded_localization_samples == 5
     assert args.loaded_localization_max_position_jump == 0.20
     assert args.loaded_localization_max_yaw_jump == 0.20
@@ -178,6 +183,12 @@ def test_loaded_shipping_prealign_is_geometry_derived_segmented_and_guarded():
     assert "_settle_without_motion" in prealign_source
     assert "_wait_for_loaded_localization_stability" in prealign_source
     assert "_prealign_localization_reconfirmation_allowed" in prealign_source
+    assert "_bounded_loaded_shipping_path_probe" in prealign_source
+    assert "args.loaded_prealign_path_handoff_max_bearing" in prealign_source
+    assert "loaded shipping path ready but bearing remains outside" in (
+        prealign_source
+    )
+    assert "if path_ready is None" in prealign_source
     assert "LOADED_PREALIGN_LOCALIZATION_RECONFIRM" in prealign_source
     assert "LOADED_PREALIGN_LOCALIZATION_RECONFIRMED" in prealign_source
     assert "LOADED_SHIPPING_PREALIGN_COMPLETE" in prealign_source
@@ -205,6 +216,45 @@ def test_prealign_reconfirmation_accepts_only_narrow_translation_boundary():
         move_shelf_to_ship._prealign_localization_reconfirmation_allowed(
             Monitor(), 0.20, 0.20, 0.23
         )
+    )
+
+
+def test_loaded_path_probe_is_bounded_and_never_starts_navigation():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    probe = _function(tree, "_bounded_loaded_shipping_path_probe")
+    probe_source = ast.get_source_segment(source, probe)
+
+    assert "ComputePathToPose.Goal()" in probe_source
+    assert "request.use_start = False" in probe_source
+    assert "request.planner_id = planner_id" in probe_source
+    assert "time.monotonic() + timeout" in probe_source
+    assert "goal_handle.cancel_goal_async()" in probe_source
+    assert "GoalStatus.STATUS_SUCCEEDED" in probe_source
+    assert "_path_reaches_goal" in probe_source
+    assert "goToPose" not in probe_source
+    assert "cmd_vel" not in probe_source
+
+
+def test_path_probe_result_requires_map_frame_finite_endpoint_near_goal():
+    from nav_msgs.msg import Path
+
+    goal = PoseStamped()
+    goal.header.frame_id = "map"
+    goal.pose.position.x = 2.0
+    goal.pose.position.y = 1.0
+    path = Path()
+    path.header.frame_id = "map"
+    path.poses = [PoseStamped(), PoseStamped()]
+    path.poses[-1].pose.position.x = 2.1
+    path.poses[-1].pose.position.y = 1.1
+
+    assert move_shelf_to_ship._path_reaches_goal(
+        path, "map", goal, 0.75
+    )
+    path.header.frame_id = "odom"
+    assert not move_shelf_to_ship._path_reaches_goal(
+        path, "map", goal, 0.75
     )
 
 
