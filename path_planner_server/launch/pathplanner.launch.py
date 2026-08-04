@@ -78,6 +78,9 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     use_keepout = LaunchConfiguration("use_keepout")
     use_rviz = LaunchConfiguration("use_rviz")
+    lateral_execution_enabled = LaunchConfiguration(
+        "lateral_execution_enabled"
+    )
     keepout_mask_file = LaunchConfiguration("keepout_mask_file")
     package_share = FindPackageShare("path_planner_server")
     map_package_share = FindPackageShare("map_server")
@@ -127,6 +130,14 @@ def generate_launch_description():
                 description=(
                     "Start the single Checkpoint 12 Navigation RViz. "
                     "Localization RViz remains disabled by default."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "lateral_execution_enabled",
+                default_value="false",
+                description=(
+                    "Enable the simulation-only bounded lateral-centering "
+                    "executor. Defaults to disabled."
                 ),
             ),
             DeclareLaunchArgument(
@@ -209,7 +220,11 @@ def generate_launch_description():
                     {
                         "use_sim_time": ParameterValue(
                             use_sim_time, value_type=bool
-                        )
+                        ),
+                        "lateral_execution_enabled": ParameterValue(
+                            lateral_execution_enabled,
+                            value_type=bool,
+                        ),
                     }
                 ],
             ),
