@@ -320,6 +320,9 @@ def test_shipping_timeout_cancels_without_advancing(monkeypatch):
 
 def test_shipping_localization_jump_cancels_before_completion(monkeypatch):
     class Monitor:
+        last_position_jump = 0.42
+        last_yaw_jump = 0.31
+
         def sample(self):
             return False
 
@@ -353,6 +356,8 @@ def test_shipping_localization_jump_cancels_before_completion(monkeypatch):
     assert navigator.cancelled
     assert any(
         "localization jump" in message
+        and "translation=0.420" in message
+        and "yaw=0.310" in message
         for _level, message in navigator.logger.messages
     )
 

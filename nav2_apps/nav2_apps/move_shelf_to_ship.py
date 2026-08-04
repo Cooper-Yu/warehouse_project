@@ -638,6 +638,8 @@ class _LoadedLocalizationMonitor:
             self.buffer, navigator, spin_thread=False
         )
         self.previous: Optional[tuple] = None
+        self.last_position_jump = 0.0
+        self.last_yaw_jump = 0.0
 
     def sample(self) -> Optional[bool]:
         import tf2_ros
@@ -656,6 +658,13 @@ class _LoadedLocalizationMonitor:
         if self.previous is None:
             self.previous = current
             return True
+        self.last_position_jump = math.hypot(
+            current[0] - self.previous[0],
+            current[1] - self.previous[1],
+        )
+        self.last_yaw_jump = abs(
+            _normalize_angle(current[2] - self.previous[2])
+        )
         stable = localization_step_is_stable(
             self.previous,
             current,
@@ -681,14 +690,24 @@ def _wait_for_loaded_localization_stability(
         return False
     deadline = time.monotonic() + timeout
     accepted = 0
+    next_sample_at = time.monotonic()
     while rclpy.ok() and time.monotonic() < deadline:
-        rclpy.spin_once(navigator, timeout_sec=sample_interval)
+        now = time.monotonic()
+        if now < next_sample_at:
+            rclpy.spin_once(
+                navigator,
+                timeout_sec=min(0.1, next_sample_at - now),
+            )
+            continue
         stable = monitor.sample()
         if stable is None:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
             continue
         if not stable:
             navigator.get_logger().error(
-                "loaded localization gate rejected: map-to-odom jump"
+                "loaded localization gate rejected: map-to-odom jump "
+                f"translation={monitor.last_position_jump:.3f} "
+                f"yaw={monitor.last_yaw_jump:.3f}"
             )
             return False
         accepted += 1
@@ -698,6 +717,7 @@ def _wait_for_loaded_localization_stability(
                 f"samples={accepted}/{sample_count}"
             )
             return True
+        next_sample_at = time.monotonic() + sample_interval
     navigator.get_logger().error(
         "loaded localization gate timed out before stable samples"
     )
@@ -1523,7 +1543,10 @@ def _navigate_to_shipping(
             if localization_stable is False:
                 navigator.cancelTask()
                 navigator.get_logger().error(
-                    "shipping canceled: loaded localization jump detected"
+                    "shipping canceled: loaded localization jump detected "
+                    f"translation="
+                    f"{localization_monitor.last_position_jump:.3f} "
+                    f"yaw={localization_monitor.last_yaw_jump:.3f}"
                 )
                 return ExitCode.CANCELED
 

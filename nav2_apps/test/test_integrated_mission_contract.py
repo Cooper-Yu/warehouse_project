@@ -111,6 +111,20 @@ def test_loaded_localization_monitor_reads_direct_map_to_odom_transform():
     assert "self.odom_frame, self.base_frame" not in monitor_source
 
 
+def test_loaded_localization_preflight_enforces_monotonic_sample_spacing():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    gate = _function(tree, "_wait_for_loaded_localization_stability")
+    gate_source = ast.get_source_segment(source, gate)
+
+    assert "next_sample_at = time.monotonic()" in gate_source
+    assert "if now < next_sample_at" in gate_source
+    assert "next_sample_at - now" in gate_source
+    assert "next_sample_at = time.monotonic() + sample_interval" in gate_source
+    assert "monitor.last_position_jump" in gate_source
+    assert "monitor.last_yaw_jump" in gate_source
+
+
 def test_loaded_egress_is_bounded_and_ordered_before_shipping():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
