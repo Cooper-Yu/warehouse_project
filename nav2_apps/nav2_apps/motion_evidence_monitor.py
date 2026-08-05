@@ -2,19 +2,25 @@
 
 import csv
 from datetime import datetime, timezone
+import gzip
+import json
 import math
 from pathlib import Path
 from typing import Optional
 
 import rclpy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PolygonStamped, Twist
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.msg import Costmap
 from nav_msgs.msg import Odometry, Path as NavPath
 from rcl_interfaces.msg import Log
+from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from tf2_ros import Buffer, TransformException, TransformListener
 
 
 def yaw_from_quaternion(quaternion) -> float:
@@ -79,6 +85,88 @@ def _pose_values(pose) -> tuple:
     )
 
 
+def _point_in_polygon(x: float, y: float, points: list) -> bool:
+    """Return whether a point lies inside a non-self-intersecting polygon."""
+    inside = False
+    previous = len(points) - 1
+    for current in range(len(points)):
+        current_x, current_y = points[current]
+        previous_x, previous_y = points[previous]
+        crosses = (current_y > y) != (previous_y > y)
+        if crosses:
+            boundary_x = (
+                (previous_x - current_x)
+                * (y - current_y)
+                / (previous_y - current_y)
+                + current_x
+            )
+            if x < boundary_x:
+                inside = not inside
+        previous = current
+    return inside
+
+
+def analyze_costmap_start(costmap, footprint, pose: tuple) -> dict:
+    """Summarize the start cell and costs covered by a map-frame footprint."""
+    metadata = costmap.metadata
+    resolution = float(metadata.resolution)
+    size_x = int(metadata.size_x)
+    size_y = int(metadata.size_y)
+    origin_x = float(metadata.origin.position.x)
+    origin_y = float(metadata.origin.position.y)
+    result = {
+        "start_grid_x": None,
+        "start_grid_y": None,
+        "start_cost": None,
+        "footprint_cells": 0,
+        "footprint_free": 0,
+        "footprint_inflated": 0,
+        "footprint_inscribed": 0,
+        "footprint_lethal": 0,
+        "footprint_unknown": 0,
+        "footprint_outside": 0,
+    }
+    if resolution <= 0.0 or size_x <= 0 or size_y <= 0:
+        return result
+
+    start_x = math.floor((pose[0] - origin_x) / resolution)
+    start_y = math.floor((pose[1] - origin_y) / resolution)
+    result["start_grid_x"] = start_x
+    result["start_grid_y"] = start_y
+    if 0 <= start_x < size_x and 0 <= start_y < size_y:
+        result["start_cost"] = int(costmap.data[start_y * size_x + start_x])
+
+    points = [(float(point.x), float(point.y)) for point in footprint]
+    if len(points) < 3:
+        return result
+    min_x = math.floor((min(x for x, _ in points) - origin_x) / resolution)
+    max_x = math.floor((max(x for x, _ in points) - origin_x) / resolution)
+    min_y = math.floor((min(y for _, y in points) - origin_y) / resolution)
+    max_y = math.floor((max(y for _, y in points) - origin_y) / resolution)
+    for grid_y in range(min_y, max_y + 1):
+        for grid_x in range(min_x, max_x + 1):
+            world_x = origin_x + (grid_x + 0.5) * resolution
+            world_y = origin_y + (grid_y + 0.5) * resolution
+            if not _point_in_polygon(world_x, world_y, points):
+                continue
+            result["footprint_cells"] += 1
+            if not (0 <= grid_x < size_x and 0 <= grid_y < size_y):
+                result["footprint_outside"] += 1
+                continue
+            cost = int(costmap.data[grid_y * size_x + grid_x])
+            if cost == 255:
+                result["footprint_unknown"] += 1
+            elif cost == 254:
+                result["footprint_lethal"] += 1
+            elif cost == 253:
+                result["footprint_inscribed"] += 1
+            elif cost == 0:
+                result["footprint_free"] += 1
+            else:
+                result["footprint_inflated"] += 1
+    return result
+
+
 class MotionEvidenceMonitor(Node):
     """Sample motion topics and selected ROS logs without publishing."""
 
@@ -86,12 +174,16 @@ class MotionEvidenceMonitor(Node):
         super().__init__("motion_evidence_monitor")
         self.declare_parameter("output_dir", "")
         self.declare_parameter("sample_hz", 2.0)
+        self.declare_parameter("map_frame", "map")
+        self.declare_parameter("base_frame", "robot_base_footprint")
 
         output_value = str(self.get_parameter("output_dir").value)
         if not output_value:
             raise RuntimeError("output_dir parameter is required")
         self.output_dir = Path(output_value)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.map_frame = str(self.get_parameter("map_frame").value)
+        self.base_frame = str(self.get_parameter("base_frame").value)
 
         self.phase = "IDLE"
         self.map_pose: Optional[tuple] = None
@@ -102,6 +194,13 @@ class MotionEvidenceMonitor(Node):
         self.recoveries: Optional[int] = None
         self.global_path_poses = 0
         self.local_path_poses = 0
+        self.global_costmap: Optional[Costmap] = None
+        self.global_footprint: Optional[PolygonStamped] = None
+        self.costmap_snapshot_count = 0
+        self._probe_sequence = 0
+
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.sample_count = 0
         self.feedback_count = 0
@@ -123,6 +222,12 @@ class MotionEvidenceMonitor(Node):
         )
         self._motion_writer = csv.writer(self._motion_file)
         self._event_writer = csv.writer(self._event_file)
+        self._costmap_file = (self.output_dir / "costmap_snapshots.csv").open(
+            "w", encoding="utf-8", newline=""
+        )
+        self._costmap_writer = csv.writer(self._costmap_file)
+        self._costmap_dir = self.output_dir / "costmap_snapshots"
+        self._costmap_dir.mkdir(parents=True, exist_ok=True)
         self._motion_writer.writerow(
             [
                 "utc_time",
@@ -147,6 +252,42 @@ class MotionEvidenceMonitor(Node):
         )
         self._event_writer.writerow(
             ["utc_time", "ros_stamp_sec", "level", "node", "message"]
+        )
+        self._costmap_writer.writerow(
+            [
+                "sequence",
+                "utc_time",
+                "capture_ros_time_sec",
+                "probe_result",
+                "probe_log_stamp_sec",
+                "tf_x",
+                "tf_y",
+                "tf_yaw",
+                "costmap_stamp_sec",
+                "costmap_age_sec",
+                "costmap_frame",
+                "resolution",
+                "size_x",
+                "size_y",
+                "origin_x",
+                "origin_y",
+                "footprint_stamp_sec",
+                "footprint_age_sec",
+                "footprint_frame",
+                "footprint_points",
+                "start_grid_x",
+                "start_grid_y",
+                "start_cost",
+                "footprint_cells",
+                "footprint_free",
+                "footprint_inflated",
+                "footprint_inscribed",
+                "footprint_lethal",
+                "footprint_unknown",
+                "footprint_outside",
+                "raw_snapshot",
+                "status",
+            ]
         )
 
         self.create_subscription(
@@ -178,6 +319,18 @@ class MotionEvidenceMonitor(Node):
         )
         self.create_subscription(
             NavPath, "/local_plan", self._local_path_callback, 10
+        )
+        self.create_subscription(
+            Costmap,
+            "/global_costmap/costmap_raw",
+            self._global_costmap_callback,
+            10,
+        )
+        self.create_subscription(
+            PolygonStamped,
+            "/global_costmap/published_footprint",
+            self._global_footprint_callback,
+            10,
         )
         self.create_subscription(Log, "/rosout", self._log_callback, 100)
 
@@ -220,9 +373,163 @@ class MotionEvidenceMonitor(Node):
     def _local_path_callback(self, message: NavPath) -> None:
         self.local_path_poses = len(message.poses)
 
+    def _global_costmap_callback(self, message: Costmap) -> None:
+        self.global_costmap = message
+
+    def _global_footprint_callback(self, message: PolygonStamped) -> None:
+        self.global_footprint = message
+
+    @staticmethod
+    def _stamp_seconds(stamp) -> float:
+        return float(stamp.sec) + float(stamp.nanosec) / 1e9
+
+    @staticmethod
+    def _probe_result(message: str) -> Optional[str]:
+        text = message.lower()
+        for marker, result in (
+            ("loaded_path_probe_ready", "PATH_READY"),
+            ("loaded_path_probe_no_path", "NO_PATH"),
+            ("loaded_path_probe_uncertain", "UNCERTAIN"),
+        ):
+            if marker in text:
+                return result
+        return None
+
+    def _capture_probe_costmap(self, result: str, log_stamp: float) -> None:
+        self._probe_sequence += 1
+        sequence = self._probe_sequence
+        capture_time = self.get_clock().now()
+        capture_seconds = capture_time.nanoseconds / 1e9
+        status = []
+        pose = None
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.base_frame,
+                Time(),
+                timeout=Duration(seconds=0.10),
+            )
+            pose = (
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+                yaw_from_quaternion(transform.transform.rotation),
+            )
+        except TransformException as error:
+            status.append(f"tf_unavailable:{error}")
+
+        costmap = self.global_costmap
+        footprint_message = self.global_footprint
+        footprint = []
+        analysis = {}
+        raw_name = ""
+        if costmap is None:
+            status.append("costmap_unavailable")
+        if footprint_message is None:
+            status.append("footprint_unavailable")
+        else:
+            footprint = list(footprint_message.polygon.points)
+        if costmap is not None and pose is not None and footprint:
+            analysis = analyze_costmap_start(costmap, footprint, pose)
+            raw_name = f"probe_{sequence:03d}_{result.lower()}.json.gz"
+            metadata = costmap.metadata
+            raw_payload = {
+                "sequence": sequence,
+                "probe_result": result,
+                "probe_log_stamp_sec": log_stamp,
+                "capture_ros_time_sec": capture_seconds,
+                "tf_pose": {"x": pose[0], "y": pose[1], "yaw": pose[2]},
+                "costmap": {
+                    "stamp_sec": self._stamp_seconds(costmap.header.stamp),
+                    "frame_id": costmap.header.frame_id,
+                    "resolution": float(metadata.resolution),
+                    "size_x": int(metadata.size_x),
+                    "size_y": int(metadata.size_y),
+                    "origin": {
+                        "x": metadata.origin.position.x,
+                        "y": metadata.origin.position.y,
+                    },
+                    "data": [int(value) for value in costmap.data],
+                },
+                "footprint": [
+                    {"x": point.x, "y": point.y, "z": point.z}
+                    for point in footprint
+                ],
+                "analysis": analysis,
+            }
+            with gzip.open(
+                self._costmap_dir / raw_name, "wt", encoding="utf-8"
+            ) as raw_file:
+                json.dump(raw_payload, raw_file, separators=(",", ":"))
+            self.costmap_snapshot_count += 1
+
+        costmap_stamp = (
+            None
+            if costmap is None
+            else self._stamp_seconds(costmap.header.stamp)
+        )
+        footprint_stamp = (
+            None
+            if footprint_message is None
+            else self._stamp_seconds(footprint_message.header.stamp)
+        )
+        metadata = None if costmap is None else costmap.metadata
+        row = [
+            sequence,
+            datetime.now(timezone.utc).isoformat(),
+            f"{capture_seconds:.9f}",
+            result,
+            f"{log_stamp:.9f}",
+            "" if pose is None else pose[0],
+            "" if pose is None else pose[1],
+            "" if pose is None else pose[2],
+            "" if costmap_stamp is None else f"{costmap_stamp:.9f}",
+            "" if costmap_stamp is None else capture_seconds - costmap_stamp,
+            "" if costmap is None else costmap.header.frame_id,
+            "" if metadata is None else metadata.resolution,
+            "" if metadata is None else metadata.size_x,
+            "" if metadata is None else metadata.size_y,
+            "" if metadata is None else metadata.origin.position.x,
+            "" if metadata is None else metadata.origin.position.y,
+            "" if footprint_stamp is None else f"{footprint_stamp:.9f}",
+            (
+                ""
+                if footprint_stamp is None
+                else capture_seconds - footprint_stamp
+            ),
+            (
+                ""
+                if footprint_message is None
+                else footprint_message.header.frame_id
+            ),
+            json.dumps(
+                [[point.x, point.y] for point in footprint],
+                separators=(",", ":"),
+            ),
+        ]
+        for field in (
+            "start_grid_x",
+            "start_grid_y",
+            "start_cost",
+            "footprint_cells",
+            "footprint_free",
+            "footprint_inflated",
+            "footprint_inscribed",
+            "footprint_lethal",
+            "footprint_unknown",
+            "footprint_outside",
+        ):
+            row.append(analysis.get(field, ""))
+        row.extend([raw_name, "ok" if not status else "|".join(status)])
+        self._costmap_writer.writerow(row)
+        self._costmap_file.flush()
+
     def _log_callback(self, message: Log) -> None:
         self.phase = phase_from_log(message.msg, self.phase)
         self.phases.add(self.phase)
+        probe_result = self._probe_result(message.msg)
+        stamp = float(message.stamp.sec) + float(message.stamp.nanosec) / 1e9
+        if probe_result is not None:
+            self._capture_probe_costmap(probe_result, stamp)
         selected_names = (
             "basic_navigator",
             "shelf_detection_server",
@@ -234,7 +541,6 @@ class MotionEvidenceMonitor(Node):
         selected = any(name in message.name for name in selected_names)
         if not selected and int(message.level) < 30:
             return
-        stamp = float(message.stamp.sec) + float(message.stamp.nanosec) / 1e9
         self._event_writer.writerow(
             [
                 datetime.now(timezone.utc).isoformat(),
@@ -285,8 +591,10 @@ class MotionEvidenceMonitor(Node):
     def close(self) -> None:
         self._motion_file.flush()
         self._event_file.flush()
+        self._costmap_file.flush()
         self._motion_file.close()
         self._event_file.close()
+        self._costmap_file.close()
         summary = self.output_dir / "summary.md"
         summary.write_text(
             "\n".join(
@@ -308,9 +616,12 @@ class MotionEvidenceMonitor(Node):
                     f"- Max |linear.x|: {self.max_abs_linear:.4f}",
                     f"- Max |angular.z|: {self.max_abs_angular:.4f}",
                     f"- Max recoveries: {self.max_recoveries}",
+                    "- Full probe costmap snapshots: "
+                    f"{self.costmap_snapshot_count}",
                     "",
-                    "Raw `motion.csv`, `events.csv`, and process logs "
-                    "remain local.",
+                    "Raw `motion.csv`, `events.csv`, "
+                    "`costmap_snapshots.csv`, compressed probe costmaps, "
+                    "and process logs remain local.",
                 ]
             )
             + "\n",
