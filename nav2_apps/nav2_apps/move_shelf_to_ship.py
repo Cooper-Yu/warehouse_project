@@ -219,6 +219,18 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-handoff-path-lookahead", type=float, default=0.30
     )
     parser.add_argument(
+        "--loaded-handoff-max-nav-yaw", type=float, default=0.60
+    )
+    parser.add_argument(
+        "--loaded-handoff-max-turn-segment", type=float, default=0.35
+    )
+    parser.add_argument(
+        "--loaded-handoff-max-total-turn", type=float, default=2.80
+    )
+    parser.add_argument(
+        "--loaded-handoff-max-turn-rounds", type=int, default=8
+    )
+    parser.add_argument(
         "--loaded-egress-motion-timeout", type=float, default=20.0
     )
     parser.add_argument(
@@ -2002,6 +2014,7 @@ def _loaded_dynamic_handoff_ready(
     navigator: BasicNavigator,
     args: argparse.Namespace,
     shipping_pose: PoseStamped,
+    assessment_output: Optional[list] = None,
 ) -> Optional[bool]:
     messages = _read_loaded_handoff_clearance(
         navigator, args.loaded_handoff_costmap_timeout
@@ -2068,7 +2081,105 @@ def _loaded_dynamic_handoff_ready(
         f"local_lethal={analyses['local']['footprint_lethal']} "
         f"local_outside={analyses['local']['footprint_outside']}"
     )
+    if assessment_output is not None:
+        assessment_output.append(
+            {
+                "yaw_delta": yaw_delta,
+                "blocked": blocked,
+                "analyses": analyses,
+            }
+        )
     return not blocked
+
+
+def _bounded_loaded_prehandoff_rotation(
+    navigator: BasicNavigator,
+    args: argparse.Namespace,
+    shipping_pose: PoseStamped,
+    localization_monitor: _LoadedLocalizationMonitor,
+) -> bool:
+    """Consume a safe large initial path turn in stopped checked segments."""
+    if (
+        args.loaded_handoff_max_nav_yaw < 0.0
+        or args.loaded_handoff_max_turn_segment <= 0.0
+        or args.loaded_handoff_max_total_turn <= 0.0
+        or args.loaded_handoff_max_turn_rounds <= 0
+    ):
+        navigator.get_logger().error(
+            "LOADED_PREHANDOFF_ROTATION_UNCERTAIN: invalid limits"
+        )
+        return False
+    total_turn = 0.0
+    for round_index in range(1, args.loaded_handoff_max_turn_rounds + 1):
+        assessments = []
+        readiness = _loaded_dynamic_handoff_ready(
+            navigator, args, shipping_pose, assessments
+        )
+        if readiness is None or not assessments:
+            navigator.get_logger().error(
+                "LOADED_PREHANDOFF_ROTATION_UNCERTAIN: assessment failed"
+            )
+            return False
+        if not readiness:
+            navigator.get_logger().error(
+                "LOADED_PREHANDOFF_ROTATION_BLOCKED: swept clearance lost"
+            )
+            return False
+        yaw_delta = assessments[0]["yaw_delta"]
+        if abs(yaw_delta) <= args.loaded_handoff_max_nav_yaw:
+            navigator.get_logger().info(
+                "LOADED_PREHANDOFF_ROTATION_READY: "
+                f"remaining_yaw={yaw_delta:.3f} "
+                f"total_turn={total_turn:.3f} rounds={round_index - 1}"
+            )
+            return True
+        segment = math.copysign(
+            min(abs(yaw_delta), args.loaded_handoff_max_turn_segment),
+            yaw_delta,
+        )
+        if total_turn + abs(segment) > (
+            args.loaded_handoff_max_total_turn + 1e-9
+        ):
+            navigator.get_logger().error(
+                "LOADED_PREHANDOFF_ROTATION_LIMIT_REJECTED: "
+                f"total={total_turn + abs(segment):.3f}"
+            )
+            return False
+        navigator.get_logger().info(
+            "LOADED_PREHANDOFF_ROTATION_SEGMENT: "
+            f"round={round_index} target={segment:.3f} "
+            f"remaining_before={yaw_delta:.3f}"
+        )
+        if not _bounded_rotate_by_odom(
+            navigator,
+            args.cmd_vel_topic,
+            args.odom_frame,
+            args.base_frame,
+            segment,
+            args.loaded_egress_angular_speed,
+            args.loaded_egress_motion_timeout,
+            args.odom_lookup_timeout,
+            args.loaded_egress_yaw_tolerance,
+        ):
+            return False
+        total_turn += abs(segment)
+        if not _settle_without_motion(navigator, args.exit_settle):
+            return False
+        if not _wait_for_loaded_localization_stability(
+            navigator,
+            localization_monitor,
+            args.loaded_localization_samples,
+            args.loaded_localization_sample_interval,
+            args.shipping_pose_lookup_timeout,
+        ):
+            navigator.get_logger().error(
+                "LOADED_PREHANDOFF_ROTATION_LOCALIZATION_REJECTED"
+            )
+            return False
+    navigator.get_logger().error(
+        "LOADED_PREHANDOFF_ROTATION_ROUNDS_EXHAUSTED"
+    )
+    return False
 
 
 def _wait_for_loaded_handoff_clearance(
@@ -2812,6 +2923,17 @@ def _run_integrated_mission(
         args.shipping_pose_lookup_timeout,
     ):
         return ExitCode.UNKNOWN
+    shipping_pose = _pose(
+        navigator,
+        args.frame_id,
+        args.shipping_x,
+        args.shipping_y,
+        args.shipping_yaw,
+    )
+    if not _bounded_loaded_prehandoff_rotation(
+        navigator, args, shipping_pose, localization_monitor
+    ):
+        return ExitCode.UNKNOWN
     if not _wait_for_loaded_handoff_clearance(
         navigator, args.loaded_handoff_costmap_timeout
     ):
@@ -2860,13 +2982,6 @@ def _run_integrated_mission(
         f"angular={args.loaded_shipping_max_angular_speed:.3f}"
     )
 
-    shipping_pose = _pose(
-        navigator,
-        args.frame_id,
-        args.shipping_x,
-        args.shipping_y,
-        args.shipping_yaw,
-    )
     speed_restore_verified = False
     try:
         shipping_result = _navigate_to_shipping(

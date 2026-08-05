@@ -1,6 +1,7 @@
 import ast
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
@@ -62,6 +63,10 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_handoff_costmap_timeout == 5.0
     assert args.loaded_handoff_sweep_step == 0.05
     assert args.loaded_handoff_path_lookahead == 0.30
+    assert args.loaded_handoff_max_nav_yaw == 0.60
+    assert args.loaded_handoff_max_turn_segment == 0.35
+    assert args.loaded_handoff_max_total_turn == 2.80
+    assert args.loaded_handoff_max_turn_rounds == 8
     assert args.loaded_prealign_max_segment_yaw == 0.15
     assert args.loaded_prealign_arc_max_distance == 0.12
     assert args.loaded_prealign_arc_linear_speed == 0.04
@@ -270,6 +275,87 @@ def test_loaded_dynamic_handoff_requires_path_bearing_and_two_sweeps():
     assert 'for prefix in ("global", "local")' in gate_source
     assert "_swept_clearance_analysis" in gate_source
     assert "LOADED_DYNAMIC_HANDOFF_RESULT" in gate_source
+    assert "assessment_output.append" in gate_source
+
+
+def test_loaded_prehandoff_rotation_is_segmented_and_rechecked():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    rotation = _function(tree, "_bounded_loaded_prehandoff_rotation")
+    rotation_source = ast.get_source_segment(source, rotation)
+
+    assert "args.loaded_handoff_max_nav_yaw" in rotation_source
+    assert "args.loaded_handoff_max_turn_segment" in rotation_source
+    assert "args.loaded_handoff_max_total_turn" in rotation_source
+    assert "args.loaded_handoff_max_turn_rounds" in rotation_source
+    assert "_loaded_dynamic_handoff_ready" in rotation_source
+    assert "_bounded_rotate_by_odom" in rotation_source
+    assert "_settle_without_motion" in rotation_source
+    assert "_wait_for_loaded_localization_stability" in rotation_source
+    assert "LOADED_PREHANDOFF_ROTATION_READY" in rotation_source
+    assert "LOADED_PREHANDOFF_ROTATION_LIMIT_REJECTED" in rotation_source
+    assert "LOADED_PREHANDOFF_ROTATION_ROUNDS_EXHAUSTED" in rotation_source
+
+
+def test_loaded_prehandoff_rotation_consumes_large_yaw_in_small_segments(
+    monkeypatch,
+):
+    yaw_sequence = iter((-1.10, -0.70, -0.40))
+    rotations = []
+
+    def assess(_navigator, _args, _pose, output):
+        output.append({"yaw_delta": next(yaw_sequence), "blocked": False})
+        return True
+
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_loaded_dynamic_handoff_ready", assess
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_rotate_by_odom",
+        lambda _navigator, _topic, _odom, _base, yaw, *_rest: (
+            rotations.append(yaw) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_settle_without_motion", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_wait_for_loaded_localization_stability",
+        lambda *_args: True,
+    )
+
+    class Logger:
+        def info(self, _message):
+            pass
+
+        def error(self, _message):
+            pass
+
+    navigator = SimpleNamespace(get_logger=lambda: Logger())
+    args = SimpleNamespace(
+        loaded_handoff_max_nav_yaw=0.60,
+        loaded_handoff_max_turn_segment=0.35,
+        loaded_handoff_max_total_turn=2.80,
+        loaded_handoff_max_turn_rounds=8,
+        cmd_vel_topic="/cmd_vel",
+        odom_frame="odom",
+        base_frame="robot_base_footprint",
+        loaded_egress_angular_speed=0.05,
+        loaded_egress_motion_timeout=20.0,
+        odom_lookup_timeout=1.0,
+        loaded_egress_yaw_tolerance=0.01,
+        exit_settle=1.0,
+        loaded_localization_samples=5,
+        loaded_localization_sample_interval=0.2,
+        shipping_pose_lookup_timeout=5.0,
+    )
+
+    assert move_shelf_to_ship._bounded_loaded_prehandoff_rotation(
+        navigator, args, PoseStamped(), object()
+    )
+    assert rotations == pytest.approx([-0.35, -0.35])
 
 
 def test_swept_clearance_samples_every_intermediate_yaw_and_fails_closed():
