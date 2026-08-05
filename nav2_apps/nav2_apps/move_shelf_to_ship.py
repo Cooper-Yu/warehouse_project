@@ -246,6 +246,16 @@ def _parser() -> argparse.ArgumentParser:
         default=0.20,
     )
     parser.add_argument(
+        "--loaded-egress-extreme-max-reverse-per-round",
+        type=float,
+        default=0.30,
+    )
+    parser.add_argument(
+        "--loaded-egress-extreme-max-total-reverse",
+        type=float,
+        default=2.00,
+    )
+    parser.add_argument(
         "--loaded-egress-arc-distance", type=float, default=0.35
     )
     parser.add_argument(
@@ -2004,6 +2014,10 @@ def _loaded_egress_extreme_left_90_experiment(
     turn_step = args.loaded_egress_extreme_turn_step
     reverse_step = args.loaded_egress_extreme_reverse_per_turn
     final_reverse = args.loaded_egress_extreme_final_reverse
+    max_reverse_per_round = (
+        args.loaded_egress_extreme_max_reverse_per_round
+    )
+    max_total_reverse = args.loaded_egress_extreme_max_total_reverse
     if (
         target_yaw <= 0.0
         or target_yaw > math.pi / 2.0 + 1e-9
@@ -2011,6 +2025,8 @@ def _loaded_egress_extreme_left_90_experiment(
         or turn_step > target_yaw
         or reverse_step <= 0.0
         or final_reverse <= 0.0
+        or max_reverse_per_round < reverse_step
+        or max_total_reverse < final_reverse
     ):
         navigator.get_logger().error(
             "LOADED_EGRESS_EXTREME_UNCERTAIN: invalid experiment limits"
@@ -2056,29 +2072,54 @@ def _loaded_egress_extreme_left_90_experiment(
         if not _settle_without_motion(navigator, args.exit_settle):
             return False
 
-        if not _bounded_reverse_by_odom(
-            navigator,
-            args.cmd_vel_topic,
-            args.odom_frame,
-            args.base_frame,
-            reverse_step,
-            args.loaded_egress_linear_speed,
-            args.loaded_egress_motion_timeout,
-            args.odom_lookup_timeout,
-            args.exit_heading_tolerance,
-            args.exit_lateral_tolerance,
-            f"loaded extreme egress round {round_index}",
-        ):
-            return False
-        total_reverse += reverse_step
-        if not _settle_without_motion(navigator, args.exit_settle):
-            return False
-        risk = _read_loaded_current_risk(
-            navigator, args.loaded_handoff_costmap_timeout
-        )
-        if risk is None or risk[0] != 0 or risk[1] != 0:
+        reverse_this_round = 0.0
+        risk = None
+        while reverse_this_round + 1e-9 < max_reverse_per_round:
+            if total_reverse + reverse_step > max_total_reverse + 1e-9:
+                navigator.get_logger().error(
+                    "LOADED_EGRESS_EXTREME_TOTAL_REVERSE_EXHAUSTED: "
+                    f"total={total_reverse:.3f} next={reverse_step:.3f} "
+                    f"max={max_total_reverse:.3f}"
+                )
+                return False
+            if not _bounded_reverse_by_odom(
+                navigator,
+                args.cmd_vel_topic,
+                args.odom_frame,
+                args.base_frame,
+                reverse_step,
+                args.loaded_egress_linear_speed,
+                args.loaded_egress_motion_timeout,
+                args.odom_lookup_timeout,
+                args.exit_heading_tolerance,
+                args.exit_lateral_tolerance,
+                f"loaded extreme egress round {round_index}",
+            ):
+                return False
+            total_reverse += reverse_step
+            reverse_this_round += reverse_step
+            if not _settle_without_motion(navigator, args.exit_settle):
+                return False
+            risk = _read_loaded_current_risk(
+                navigator, args.loaded_handoff_costmap_timeout
+            )
+            if risk is None or risk[0] != 0:
+                navigator.get_logger().error(
+                    "LOADED_EGRESS_EXTREME_PAIR_OUTSIDE_OR_UNCERTAIN: "
+                    f"round={round_index} risk={risk}"
+                )
+                return False
+            navigator.get_logger().info(
+                "LOADED_EGRESS_EXTREME_REVERSE_RESULT: "
+                f"round={round_index} round_reverse="
+                f"{reverse_this_round:.3f} total_reverse="
+                f"{total_reverse:.3f} risk={risk}"
+            )
+            if risk[1] == 0:
+                break
+        else:
             navigator.get_logger().error(
-                "LOADED_EGRESS_EXTREME_PAIR_BLOCKED: "
+                "LOADED_EGRESS_EXTREME_ROUND_REVERSE_EXHAUSTED: "
                 f"round={round_index} risk={risk}"
             )
             return False
@@ -2088,6 +2129,13 @@ def _loaded_egress_extreme_left_90_experiment(
             f"total_reverse={total_reverse:.3f} risk={risk}"
         )
 
+    if total_reverse + final_reverse > max_total_reverse + 1e-9:
+        navigator.get_logger().error(
+            "LOADED_EGRESS_EXTREME_FINAL_REVERSE_LIMIT_REJECTED: "
+            f"total={total_reverse:.3f} final={final_reverse:.3f} "
+            f"max={max_total_reverse:.3f}"
+        )
+        return False
     if not _bounded_reverse_by_odom(
         navigator,
         args.cmd_vel_topic,
