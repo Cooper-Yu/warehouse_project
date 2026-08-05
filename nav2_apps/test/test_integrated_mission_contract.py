@@ -142,15 +142,16 @@ def test_loaded_egress_is_bounded_and_ordered_before_shipping():
     egress = _function(tree, "_loaded_egress_before_shipping")
     egress_source = ast.get_source_segment(source, egress)
 
-    first_reverse = egress_source.index("_bounded_reverse_by_odom")
     turn = egress_source.index("_bounded_rotate_by_odom")
+    first_reverse = egress_source.index("_bounded_reverse_by_odom")
     second_reverse = egress_source.rindex("_bounded_reverse_by_odom")
 
-    assert first_reverse < turn < second_reverse
+    assert turn < first_reverse < second_reverse
     assert egress_source.count("_bounded_reverse_by_odom") == 2
     assert egress_source.count("_settle_without_motion") == 3
     assert '"loaded egress initial reverse"' in egress_source
     assert '"loaded egress final reverse"' in egress_source
+    assert "small left turn -> reverse -> reverse" in egress_source
     assert "LOADED_EGRESS_COMPLETE" in egress_source
 
 

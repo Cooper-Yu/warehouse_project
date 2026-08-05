@@ -1472,10 +1472,24 @@ def _bounded_rotate_by_odom(
 def _loaded_egress_before_shipping(
     navigator: BasicNavigator, args: argparse.Namespace
 ) -> bool:
-    """Create loaded rotation clearance before handing motion to Nav2."""
+    """Open the rear-right escape direction before loaded retreat."""
     navigator.get_logger().info(
-        "loaded egress: reverse -> left turn -> reverse before shipping"
+        "loaded egress: small left turn -> reverse -> reverse before shipping"
     )
+    if not _bounded_rotate_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        args.loaded_egress_turn_yaw,
+        args.loaded_egress_angular_speed,
+        args.loaded_egress_motion_timeout,
+        args.odom_lookup_timeout,
+        args.loaded_egress_yaw_tolerance,
+    ):
+        return False
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
     if not _bounded_reverse_by_odom(
         navigator,
         args.cmd_vel_topic,
@@ -1488,20 +1502,6 @@ def _loaded_egress_before_shipping(
         args.exit_heading_tolerance,
         args.exit_lateral_tolerance,
         "loaded egress initial reverse",
-    ):
-        return False
-    if not _settle_without_motion(navigator, args.exit_settle):
-        return False
-    if not _bounded_rotate_by_odom(
-        navigator,
-        args.cmd_vel_topic,
-        args.odom_frame,
-        args.base_frame,
-        args.loaded_egress_turn_yaw,
-        args.loaded_egress_angular_speed,
-        args.loaded_egress_motion_timeout,
-        args.odom_lookup_timeout,
-        args.loaded_egress_yaw_tolerance,
     ):
         return False
     if not _settle_without_motion(navigator, args.exit_settle):
