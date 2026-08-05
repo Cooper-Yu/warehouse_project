@@ -198,6 +198,9 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-egress-arc-angular-speed", type=float, default=0.026
     )
     parser.add_argument(
+        "--loaded-egress-arc-distance-tolerance", type=float, default=0.01
+    )
+    parser.add_argument(
         "--loaded-egress-motion-timeout", type=float, default=20.0
     )
     parser.add_argument(
@@ -1774,7 +1777,7 @@ def _loaded_egress_before_shipping(
         args.loaded_egress_arc_angular_speed,
         args.loaded_egress_motion_timeout,
         args.odom_lookup_timeout,
-        args.exit_distance_tolerance,
+        args.loaded_egress_arc_distance_tolerance,
         args.loaded_egress_yaw_tolerance,
         "loaded egress reverse-left arc",
     ):
@@ -1792,7 +1795,7 @@ def _loaded_egress_before_shipping(
         args.loaded_egress_arc_angular_speed,
         args.loaded_egress_motion_timeout,
         args.odom_lookup_timeout,
-        args.exit_distance_tolerance,
+        args.loaded_egress_arc_distance_tolerance,
         args.loaded_egress_yaw_tolerance,
         "loaded egress reverse-right arc",
     ):

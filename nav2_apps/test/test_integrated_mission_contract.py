@@ -57,6 +57,7 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_arc_distance == 0.35
     assert args.loaded_egress_arc_yaw == 0.18
     assert args.loaded_egress_arc_angular_speed == 0.026
+    assert args.loaded_egress_arc_distance_tolerance == 0.01
     assert args.loaded_prealign_max_segment_yaw == 0.15
     assert args.loaded_prealign_arc_max_distance == 0.12
     assert args.loaded_prealign_arc_linear_speed == 0.04
@@ -176,6 +177,24 @@ def test_loaded_egress_is_one_bounded_reverse_s_curve():
     assert "args.loaded_egress_arc_yaw" in egress_source
     assert "-args.loaded_egress_arc_yaw" in egress_source
     assert "LOADED_EGRESS_REVERSE_S_COMPLETE" in egress_source
+
+
+def test_loaded_egress_namespace_contract_has_every_referenced_argument():
+    args = move_shelf_to_ship._parser().parse_args([])
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    egress = _function(tree, "_loaded_egress_before_shipping")
+    referenced = {
+        node.attr
+        for node in ast.walk(egress)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "args"
+    }
+
+    missing = sorted(name for name in referenced if not hasattr(args, name))
+
+    assert missing == []
 
 
 def test_loaded_reverse_arc_requires_both_odom_targets_and_stops():
