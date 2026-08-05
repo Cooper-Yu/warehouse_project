@@ -40,9 +40,11 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert not any(operation_modes)
     assert args.shipping_refine_distance == 0.16
     assert args.loaded_egress_initial_reverse == 0.20
-    assert args.loaded_egress_turn_yaw == 0.12
-    assert args.loaded_egress_final_reverse == 0.25
-    assert args.loaded_egress_extra_reverse == 0.10
+    assert args.loaded_egress_first_turn_yaw == 0.08
+    assert args.loaded_egress_final_reverse == 0.30
+    assert args.loaded_egress_second_turn_yaw == 0.12
+    assert args.loaded_egress_extra_reverse == 0.40
+    assert args.loaded_egress_third_turn_yaw == 0.16
     assert args.loaded_egress_linear_speed == 0.05
     assert args.loaded_egress_angular_speed == 0.05
     assert args.loaded_prealign_max_segment_yaw == 0.15
@@ -145,17 +147,34 @@ def test_loaded_egress_is_bounded_and_ordered_before_shipping():
     egress = _function(tree, "_loaded_egress_before_shipping")
     egress_source = ast.get_source_segment(source, egress)
 
-    turn = egress_source.index("_bounded_rotate_by_odom")
-    first_reverse = egress_source.index("_bounded_reverse_by_odom")
-    second_reverse = egress_source.rindex("_bounded_reverse_by_odom")
+    calls = [
+        node.func.id
+        for node in ast.walk(egress)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in {
+            "_bounded_rotate_by_odom", "_bounded_reverse_by_odom"
+        }
+    ]
 
-    assert turn < first_reverse < second_reverse
+    assert calls == [
+        "_bounded_rotate_by_odom",
+        "_bounded_reverse_by_odom",
+        "_bounded_rotate_by_odom",
+        "_bounded_reverse_by_odom",
+        "_bounded_rotate_by_odom",
+        "_bounded_reverse_by_odom",
+    ]
+    assert egress_source.count("_bounded_rotate_by_odom") == 3
     assert egress_source.count("_bounded_reverse_by_odom") == 3
-    assert egress_source.count("_settle_without_motion") == 4
+    assert egress_source.count("_settle_without_motion") == 6
     assert '"loaded egress initial reverse"' in egress_source
     assert '"loaded egress final reverse"' in egress_source
     assert '"loaded egress extra reverse"' in egress_source
-    assert "small left turn -> reverse -> reverse -> extra" in egress_source
+    assert "left 0.08 -> reverse 0.20 -> left 0.12" in egress_source
+    assert "reverse 0.30 -> left 0.16 -> reverse 0.40" in egress_source
+    assert "args.loaded_egress_first_turn_yaw" in egress_source
+    assert "args.loaded_egress_second_turn_yaw" in egress_source
+    assert "args.loaded_egress_third_turn_yaw" in egress_source
     assert "LOADED_EGRESS_COMPLETE" in egress_source
 
 

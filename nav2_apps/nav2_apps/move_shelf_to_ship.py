@@ -174,13 +174,19 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-egress-initial-reverse", type=float, default=0.20
     )
     parser.add_argument(
-        "--loaded-egress-turn-yaw", type=float, default=0.12
+        "--loaded-egress-first-turn-yaw", type=float, default=0.08
     )
     parser.add_argument(
-        "--loaded-egress-final-reverse", type=float, default=0.25
+        "--loaded-egress-final-reverse", type=float, default=0.30
     )
     parser.add_argument(
-        "--loaded-egress-extra-reverse", type=float, default=0.10
+        "--loaded-egress-second-turn-yaw", type=float, default=0.12
+    )
+    parser.add_argument(
+        "--loaded-egress-extra-reverse", type=float, default=0.40
+    )
+    parser.add_argument(
+        "--loaded-egress-third-turn-yaw", type=float, default=0.16
     )
     parser.add_argument(
         "--loaded-egress-linear-speed", type=float, default=0.05
@@ -1605,17 +1611,17 @@ def _bounded_forward_right_arc_by_odom(
 def _loaded_egress_before_shipping(
     navigator: BasicNavigator, args: argparse.Namespace
 ) -> bool:
-    """Open the rear-right escape direction before loaded retreat."""
+    """Open clearance with three progressively larger turn/reverse pairs."""
     navigator.get_logger().info(
-        "loaded egress: small left turn -> reverse -> reverse -> extra "
-        "reverse before shipping"
+        "loaded egress: left 0.08 -> reverse 0.20 -> left 0.12 -> "
+        "reverse 0.30 -> left 0.16 -> reverse 0.40 before shipping"
     )
     if not _bounded_rotate_by_odom(
         navigator,
         args.cmd_vel_topic,
         args.odom_frame,
         args.base_frame,
-        args.loaded_egress_turn_yaw,
+        args.loaded_egress_first_turn_yaw,
         args.loaded_egress_angular_speed,
         args.loaded_egress_motion_timeout,
         args.odom_lookup_timeout,
@@ -1640,6 +1646,20 @@ def _loaded_egress_before_shipping(
         return False
     if not _settle_without_motion(navigator, args.exit_settle):
         return False
+    if not _bounded_rotate_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        args.loaded_egress_second_turn_yaw,
+        args.loaded_egress_angular_speed,
+        args.loaded_egress_motion_timeout,
+        args.odom_lookup_timeout,
+        args.loaded_egress_yaw_tolerance,
+    ):
+        return False
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
     if not _bounded_reverse_by_odom(
         navigator,
         args.cmd_vel_topic,
@@ -1652,6 +1672,20 @@ def _loaded_egress_before_shipping(
         args.exit_heading_tolerance,
         args.exit_lateral_tolerance,
         "loaded egress final reverse",
+    ):
+        return False
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
+    if not _bounded_rotate_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        args.loaded_egress_third_turn_yaw,
+        args.loaded_egress_angular_speed,
+        args.loaded_egress_motion_timeout,
+        args.odom_lookup_timeout,
+        args.loaded_egress_yaw_tolerance,
     ):
         return False
     if not _settle_without_motion(navigator, args.exit_settle):
