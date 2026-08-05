@@ -72,6 +72,9 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_extreme_final_reverse == 0.20
     assert args.loaded_egress_extreme_max_reverse_per_round == 0.30
     assert args.loaded_egress_extreme_max_total_reverse == 2.00
+    assert args.loaded_egress_extreme_round2_arc_distance == 0.20
+    assert args.loaded_egress_extreme_round2_arc_yaw == 0.12
+    assert args.loaded_egress_extreme_round2_arc_angular_speed == 0.03
     assert args.loaded_egress_arc_distance == 0.35
     assert args.loaded_egress_arc_yaw == 0.18
     assert args.loaded_egress_arc_angular_speed == 0.026
@@ -176,6 +179,35 @@ def test_loaded_localization_preflight_enforces_monotonic_sample_spacing():
     assert "next_sample_at = time.monotonic() + sample_interval" in gate_source
     assert "monitor.last_position_jump" in gate_source
     assert "monitor.last_yaw_jump" in gate_source
+
+
+def test_extreme_experiment_disables_only_localization_jump_enforcement():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    mission = _function(tree, "_run_integrated_mission")
+    mission_source = ast.get_source_segment(source, mission)
+    monitor = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and node.name == "_LoadedLocalizationMonitor"
+    )
+    monitor_source = ast.get_source_segment(source, monitor)
+
+    assert "enforce_jump_limits: bool = True" in monitor_source
+    assert "if not stable and not self.enforce_jump_limits" in monitor_source
+    assert (
+        "LOADED_LOCALIZATION_JUMP_OBSERVED_NOT_ENFORCED"
+        in monitor_source
+    )
+    assert (
+        "not args.loaded_egress_extreme_left_90_experiment"
+        in mission_source
+    )
+    assert (
+        "LOADED_LOCALIZATION_JUMP_GATE_DISABLED_FOR_EXTREME_EXPERIMENT"
+        in mission_source
+    )
 
 
 def test_loaded_egress_uses_bounded_adaptive_turn_reverse_loop():
@@ -371,6 +403,7 @@ def test_extreme_left_experiment_alternates_to_ninety_then_final_reverse(
 ):
     rotations = []
     reverses = []
+    arcs = []
     risks = iter(((0, 0, 0, 10),) * 20)
 
     monkeypatch.setattr(
@@ -390,6 +423,13 @@ def test_extreme_left_experiment_alternates_to_ninety_then_final_reverse(
         "_bounded_reverse_by_odom",
         lambda _navigator, _topic, _odom, _base, distance, *_rest: (
             reverses.append(distance) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_reverse_arc_by_odom",
+        lambda _navigator, _topic, _odom, _base, distance, yaw, *_rest: (
+            arcs.append((distance, yaw)) or True
         ),
     )
     monkeypatch.setattr(
@@ -424,8 +464,11 @@ def test_extreme_left_experiment_alternates_to_ninety_then_final_reverse(
     )
     assert sum(rotations) == pytest.approx(math.pi / 2.0, abs=0.011)
     assert all(value == pytest.approx(0.10) for value in rotations[:-1])
-    assert reverses[:-1] == pytest.approx([0.05] * len(rotations))
+    assert reverses[:-1] == pytest.approx(
+        [0.05] * (len(rotations) - 1)
+    )
     assert reverses[-1] == pytest.approx(0.20)
+    assert arcs == pytest.approx([(0.20, 0.12)])
 
 
 def test_extreme_left_experiment_stops_when_a_turn_prefix_is_outside(
@@ -578,6 +621,8 @@ def test_extreme_left_experiment_stops_at_round_reverse_bound(monkeypatch):
             "0.10",
             "--loaded-egress-extreme-max-reverse-per-round",
             "0.10",
+            "--loaded-egress-extreme-round2-arc-distance",
+            "0.10",
         ]
     )
 
@@ -585,6 +630,80 @@ def test_extreme_left_experiment_stops_at_round_reverse_bound(monkeypatch):
         navigator, args
     )
     assert reverses == pytest.approx([0.05, 0.05])
+
+
+def test_extreme_round2_changes_direction_with_reverse_left_arc(monkeypatch):
+    rotations = []
+    reverses = []
+    arcs = []
+    risks = iter(((0, 0, 120, 168), (0, 0, 110, 168)))
+
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_loaded_turn_segment_within_costmap",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_rotate_by_odom",
+        lambda _navigator, _topic, _odom, _base, yaw, *_rest: (
+            rotations.append(yaw) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_reverse_by_odom",
+        lambda _navigator, _topic, _odom, _base, distance, *_rest: (
+            reverses.append(distance) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_reverse_arc_by_odom",
+        lambda _navigator, _topic, _odom, _base, distance, yaw, *_rest: (
+            arcs.append((distance, yaw)) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_settle_without_motion", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_read_loaded_current_risk",
+        lambda *_args: next(risks),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_wait_for_loaded_handoff_clearance",
+        lambda *_args: True,
+    )
+
+    class Logger:
+        def info(self, _message):
+            pass
+
+        def warning(self, _message):
+            pass
+
+        def error(self, _message):
+            pass
+
+    navigator = SimpleNamespace(get_logger=lambda: Logger())
+    args = move_shelf_to_ship._parser().parse_args(
+        [
+            "--loaded-egress-extreme-target-yaw",
+            "0.20",
+            "--loaded-egress-extreme-final-reverse",
+            "0.20",
+        ]
+    )
+
+    assert move_shelf_to_ship._loaded_egress_extreme_left_90_experiment(
+        navigator, args
+    )
+    assert rotations == pytest.approx([0.10, 0.10])
+    assert reverses == pytest.approx([0.05, 0.20])
+    assert arcs == pytest.approx([(0.20, 0.12)])
 
 
 def test_extreme_turn_preview_ignores_lethal_but_rejects_outside():

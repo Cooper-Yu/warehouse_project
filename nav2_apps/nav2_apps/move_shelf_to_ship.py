@@ -256,6 +256,21 @@ def _parser() -> argparse.ArgumentParser:
         default=2.00,
     )
     parser.add_argument(
+        "--loaded-egress-extreme-round2-arc-distance",
+        type=float,
+        default=0.20,
+    )
+    parser.add_argument(
+        "--loaded-egress-extreme-round2-arc-yaw",
+        type=float,
+        default=0.12,
+    )
+    parser.add_argument(
+        "--loaded-egress-extreme-round2-arc-angular-speed",
+        type=float,
+        default=0.03,
+    )
+    parser.add_argument(
         "--loaded-egress-arc-distance", type=float, default=0.35
     )
     parser.add_argument(
@@ -796,6 +811,7 @@ class _LoadedLocalizationMonitor:
         base_frame: str,
         max_position_jump: float,
         max_yaw_jump: float,
+        enforce_jump_limits: bool = True,
     ) -> None:
         import tf2_ros
 
@@ -804,6 +820,7 @@ class _LoadedLocalizationMonitor:
         self.base_frame = base_frame
         self.max_position_jump = max_position_jump
         self.max_yaw_jump = max_yaw_jump
+        self.enforce_jump_limits = enforce_jump_limits
         self.buffer = tf2_ros.Buffer()
         self.listener = tf2_ros.TransformListener(
             self.buffer, navigator, spin_thread=False
@@ -843,6 +860,13 @@ class _LoadedLocalizationMonitor:
             self.max_yaw_jump,
         )
         self.previous = current
+        if not stable and not self.enforce_jump_limits:
+            self.navigator.get_logger().warning(
+                "LOADED_LOCALIZATION_JUMP_OBSERVED_NOT_ENFORCED: "
+                f"translation={self.last_position_jump:.3f} "
+                f"yaw={self.last_yaw_jump:.3f}"
+            )
+            return True
         return stable
 
 
@@ -2018,6 +2042,13 @@ def _loaded_egress_extreme_left_90_experiment(
         args.loaded_egress_extreme_max_reverse_per_round
     )
     max_total_reverse = args.loaded_egress_extreme_max_total_reverse
+    round2_arc_distance = (
+        args.loaded_egress_extreme_round2_arc_distance
+    )
+    round2_arc_yaw = args.loaded_egress_extreme_round2_arc_yaw
+    round2_arc_angular_speed = (
+        args.loaded_egress_extreme_round2_arc_angular_speed
+    )
     if (
         target_yaw <= 0.0
         or target_yaw > math.pi / 2.0 + 1e-9
@@ -2027,6 +2058,10 @@ def _loaded_egress_extreme_left_90_experiment(
         or final_reverse <= 0.0
         or max_reverse_per_round < reverse_step
         or max_total_reverse < final_reverse
+        or round2_arc_distance <= 0.0
+        or round2_arc_distance > max_reverse_per_round
+        or round2_arc_yaw <= 0.0
+        or round2_arc_angular_speed <= 0.0
     ):
         navigator.get_logger().error(
             "LOADED_EGRESS_EXTREME_UNCERTAIN: invalid experiment limits"
@@ -2074,7 +2109,52 @@ def _loaded_egress_extreme_left_90_experiment(
 
         reverse_this_round = 0.0
         risk = None
+        if round_index == 2:
+            if (
+                total_reverse + round2_arc_distance
+                > max_total_reverse + 1e-9
+            ):
+                navigator.get_logger().error(
+                    "LOADED_EGRESS_EXTREME_ARC_TOTAL_LIMIT_REJECTED"
+                )
+                return False
+            if not _bounded_reverse_arc_by_odom(
+                navigator,
+                args.cmd_vel_topic,
+                args.odom_frame,
+                args.base_frame,
+                round2_arc_distance,
+                round2_arc_yaw,
+                args.loaded_egress_linear_speed,
+                round2_arc_angular_speed,
+                args.loaded_egress_motion_timeout,
+                args.odom_lookup_timeout,
+                args.loaded_egress_arc_distance_tolerance,
+                args.loaded_egress_yaw_tolerance,
+                f"loaded extreme egress round {round_index} reverse-left arc",
+            ):
+                return False
+            total_reverse += round2_arc_distance
+            reverse_this_round += round2_arc_distance
+            if not _settle_without_motion(navigator, args.exit_settle):
+                return False
+            risk = _read_loaded_current_risk(
+                navigator, args.loaded_handoff_costmap_timeout
+            )
+            if risk is None or risk[0] != 0:
+                navigator.get_logger().error(
+                    "LOADED_EGRESS_EXTREME_ARC_OUTSIDE_OR_UNCERTAIN: "
+                    f"round={round_index} risk={risk}"
+                )
+                return False
+            navigator.get_logger().info(
+                "LOADED_EGRESS_EXTREME_ARC_RESULT: "
+                f"round={round_index} distance={round2_arc_distance:.3f} "
+                f"yaw={round2_arc_yaw:.3f} risk={risk}"
+            )
         while reverse_this_round + 1e-9 < max_reverse_per_round:
+            if risk is not None and risk[1] == 0:
+                break
             if total_reverse + reverse_step > max_total_reverse + 1e-9:
                 navigator.get_logger().error(
                     "LOADED_EGRESS_EXTREME_TOTAL_REVERSE_EXHAUSTED: "
@@ -3307,7 +3387,15 @@ def _run_integrated_mission(
         args.base_frame,
         args.loaded_localization_max_position_jump,
         args.loaded_localization_max_yaw_jump,
+        enforce_jump_limits=(
+            not args.loaded_egress_extreme_left_90_experiment
+        ),
     )
+    if args.loaded_egress_extreme_left_90_experiment:
+        navigator.get_logger().warning(
+            "LOADED_LOCALIZATION_JUMP_GATE_DISABLED_FOR_EXTREME_EXPERIMENT: "
+            "jumps remain logged; default route and real profile unchanged"
+        )
     if not _wait_for_loaded_localization_stability(
         navigator,
         localization_monitor,
