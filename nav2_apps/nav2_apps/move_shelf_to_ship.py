@@ -37,6 +37,12 @@ SIM_UNLOADED_FOOTPRINT = (
     "[[0.25, 0.25], [-0.25, 0.25], "
     "[-0.25, -0.25], [0.25, -0.25]]"
 )
+LOADED_EGRESS_STAGES = (
+    (0.10, 0.15),
+    (0.15, 0.20),
+    (0.20, 0.25),
+    (0.25, 0.30),
+)
 
 
 class PathProbeResult(Enum):
@@ -1767,61 +1773,88 @@ def _bounded_reverse_arc_by_odom(
 def _loaded_egress_before_shipping(
     navigator: BasicNavigator, args: argparse.Namespace
 ) -> bool:
-    """Create right-side clearance with one bounded reverse S-curve."""
+    """Increase left yaw and reverse in bounded clearance-checked stages."""
     navigator.get_logger().info(
-        "loaded egress reverse S-curve: reverse-right 0.35/0.18 -> "
-        "reverse-left 0.35/0.18 before path probe"
+        "loaded egress staged clearance: "
+        "left/reverse 0.10/0.15 -> 0.15/0.20 -> "
+        "0.20/0.25 -> 0.25/0.30"
     )
-    if not _bounded_reverse_arc_by_odom(
-        navigator,
-        args.cmd_vel_topic,
-        args.odom_frame,
-        args.base_frame,
-        args.loaded_egress_arc_distance,
-        -args.loaded_egress_arc_yaw,
-        args.loaded_egress_linear_speed,
-        args.loaded_egress_arc_angular_speed,
-        args.loaded_egress_motion_timeout,
-        args.odom_lookup_timeout,
-        args.loaded_egress_arc_distance_tolerance,
-        args.loaded_egress_yaw_tolerance,
-        "loaded egress reverse-right arc",
-    ):
-        return False
-    if not _settle_without_motion(navigator, args.exit_settle):
-        return False
-    if not _bounded_reverse_arc_by_odom(
-        navigator,
-        args.cmd_vel_topic,
-        args.odom_frame,
-        args.base_frame,
-        args.loaded_egress_arc_distance,
-        args.loaded_egress_arc_yaw,
-        args.loaded_egress_linear_speed,
-        args.loaded_egress_arc_angular_speed,
-        args.loaded_egress_motion_timeout,
-        args.odom_lookup_timeout,
-        args.loaded_egress_arc_distance_tolerance,
-        args.loaded_egress_yaw_tolerance,
-        "loaded egress reverse-left arc",
-    ):
-        return False
-    if not _settle_without_motion(navigator, args.exit_settle):
-        return False
-    navigator.get_logger().info("LOADED_EGRESS_REVERSE_S_COMPLETE")
-    return True
+    total_yaw = 0.0
+    total_reverse = 0.0
+    for index, (yaw, distance) in enumerate(LOADED_EGRESS_STAGES, start=1):
+        total_yaw += yaw
+        total_reverse += distance
+        if total_yaw > 0.90 + 1e-9 or total_reverse > 0.90 + 1e-9:
+            navigator.get_logger().error(
+                "LOADED_EGRESS_STAGE_LIMIT_REJECTED: "
+                f"yaw={total_yaw:.3f} reverse={total_reverse:.3f}"
+            )
+            return False
+        if not _bounded_rotate_by_odom(
+            navigator,
+            args.cmd_vel_topic,
+            args.odom_frame,
+            args.base_frame,
+            yaw,
+            args.loaded_egress_angular_speed,
+            args.loaded_egress_motion_timeout,
+            args.odom_lookup_timeout,
+            args.loaded_egress_yaw_tolerance,
+        ):
+            return False
+        if not _settle_without_motion(navigator, args.exit_settle):
+            return False
+        if not _bounded_reverse_by_odom(
+            navigator,
+            args.cmd_vel_topic,
+            args.odom_frame,
+            args.base_frame,
+            distance,
+            args.loaded_egress_linear_speed,
+            args.loaded_egress_motion_timeout,
+            args.odom_lookup_timeout,
+            args.exit_heading_tolerance,
+            args.exit_lateral_tolerance,
+            f"loaded egress stage {index} reverse",
+        ):
+            return False
+        if not _settle_without_motion(navigator, args.exit_settle):
+            return False
+
+        analysis = _read_loaded_handoff_clearance(
+            navigator, args.loaded_handoff_costmap_timeout
+        )
+        if analysis is None:
+            return False
+        lethal = analysis["footprint_lethal"]
+        outside = analysis["footprint_outside"]
+        navigator.get_logger().info(
+            f"LOADED_EGRESS_STAGE_RESULT: stage={index} "
+            f"total_yaw={total_yaw:.3f} total_reverse={total_reverse:.3f} "
+            f"lethal={lethal} outside={outside}"
+        )
+        if lethal == 0 and outside == 0:
+            navigator.get_logger().info(
+                f"LOADED_EGRESS_CLEARANCE_READY: stage={index}"
+            )
+            return True
+
+    navigator.get_logger().error(
+        "LOADED_EGRESS_CLEARANCE_EXHAUSTED: four stages completed"
+    )
+    return False
 
 
-def _wait_for_loaded_handoff_clearance(
+def _read_loaded_handoff_clearance(
     navigator: BasicNavigator,
     timeout: float,
-) -> bool:
-    """Require a received costmap/footprint pair with no lethal/outside cells."""
+) -> Optional[dict]:
+    """Return one received global costmap/footprint clearance analysis."""
     if timeout <= 0.0:
         navigator.get_logger().error(
             "LOADED_HANDOFF_CLEARANCE_UNCERTAIN: invalid timeout"
         )
-        return False
+        return None
 
     costmap = None
     footprint = None
@@ -1860,36 +1893,47 @@ def _wait_for_loaded_handoff_clearance(
                 "LOADED_HANDOFF_CLEARANCE_UNCERTAIN: costmap or footprint "
                 "unavailable"
             )
-            return False
+            return None
 
         points = list(footprint.polygon.points)
         if len(points) < 3:
             navigator.get_logger().error(
                 "LOADED_HANDOFF_CLEARANCE_UNCERTAIN: invalid footprint"
             )
-            return False
+            return None
         center_x = sum(float(point.x) for point in points) / len(points)
         center_y = sum(float(point.y) for point in points) / len(points)
         analysis = analyze_costmap_start(
             costmap, points, (center_x, center_y, 0.0)
         )
-        lethal = analysis["footprint_lethal"]
-        outside = analysis["footprint_outside"]
-        if lethal or outside:
-            navigator.get_logger().error(
-                "LOADED_HANDOFF_CLEARANCE_BLOCKED: "
-                f"lethal={lethal} outside={outside} "
-                f"start_cost={analysis['start_cost']}"
-            )
-            return False
-        navigator.get_logger().info(
-            "LOADED_HANDOFF_CLEARANCE_READY: "
-            f"lethal=0 outside=0 start_cost={analysis['start_cost']}"
-        )
-        return True
+        return analysis
     finally:
         navigator.destroy_subscription(costmap_subscription)
         navigator.destroy_subscription(footprint_subscription)
+
+
+def _wait_for_loaded_handoff_clearance(
+    navigator: BasicNavigator,
+    timeout: float,
+) -> bool:
+    """Require a received footprint with no lethal or outside costmap cells."""
+    analysis = _read_loaded_handoff_clearance(navigator, timeout)
+    if analysis is None:
+        return False
+    lethal = analysis["footprint_lethal"]
+    outside = analysis["footprint_outside"]
+    if lethal or outside:
+        navigator.get_logger().error(
+            "LOADED_HANDOFF_CLEARANCE_BLOCKED: "
+            f"lethal={lethal} outside={outside} "
+            f"start_cost={analysis['start_cost']}"
+        )
+        return False
+    navigator.get_logger().info(
+        "LOADED_HANDOFF_CLEARANCE_READY: "
+        f"lethal=0 outside=0 start_cost={analysis['start_cost']}"
+    )
+    return True
 
 
 def _prealign_loaded_shipping_bearing(

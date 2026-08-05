@@ -154,34 +154,45 @@ def test_loaded_localization_preflight_enforces_monotonic_sample_spacing():
     assert "monitor.last_yaw_jump" in gate_source
 
 
-def test_loaded_egress_is_one_bounded_reverse_s_curve():
+def test_loaded_egress_uses_bounded_clearance_checked_stages():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     egress = _function(tree, "_loaded_egress_before_shipping")
     egress_source = ast.get_source_segment(source, egress)
 
-    calls = [
+    rotate_calls = [
         node.func.id
         for node in ast.walk(egress)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id == "_bounded_reverse_arc_by_odom"
+        and node.func.id == "_bounded_rotate_by_odom"
+    ]
+    reverse_calls = [
+        node.func.id
+        for node in ast.walk(egress)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_bounded_reverse_by_odom"
     ]
 
-    assert calls == [
-        "_bounded_reverse_arc_by_odom",
-        "_bounded_reverse_arc_by_odom",
-    ]
-    assert egress_source.count("_bounded_reverse_arc_by_odom") == 2
-    assert egress_source.count("_settle_without_motion") == 2
-    assert "reverse-right 0.35/0.18" in egress_source
-    assert "reverse-left 0.35/0.18" in egress_source
-    assert "args.loaded_egress_arc_distance" in egress_source
-    assert "args.loaded_egress_arc_yaw" in egress_source
-    assert "-args.loaded_egress_arc_yaw" in egress_source
-    assert egress_source.index("-args.loaded_egress_arc_yaw") < (
-        egress_source.index("args.loaded_egress_arc_yaw", 1)
+    assert move_shelf_to_ship.LOADED_EGRESS_STAGES == (
+        (0.10, 0.15),
+        (0.15, 0.20),
+        (0.20, 0.25),
+        (0.25, 0.30),
     )
-    assert "LOADED_EGRESS_REVERSE_S_COMPLETE" in egress_source
+    assert "for index, (yaw, distance) in enumerate(" in egress_source
+    assert "LOADED_EGRESS_STAGES, start=1" in egress_source
+    assert rotate_calls == ["_bounded_rotate_by_odom"]
+    assert reverse_calls == ["_bounded_reverse_by_odom"]
+    assert egress_source.count("_settle_without_motion") == 2
+    assert "_read_loaded_handoff_clearance" in egress_source
+    assert 'analysis["footprint_lethal"]' in egress_source
+    assert 'analysis["footprint_outside"]' in egress_source
+    assert "if lethal == 0 and outside == 0" in egress_source
+    assert "total_yaw > 0.90" in egress_source
+    assert "total_reverse > 0.90" in egress_source
+    assert "LOADED_EGRESS_STAGE_RESULT" in egress_source
+    assert "LOADED_EGRESS_CLEARANCE_READY" in egress_source
+    assert "LOADED_EGRESS_CLEARANCE_EXHAUSTED" in egress_source
 
 
 def test_loaded_egress_namespace_contract_has_every_referenced_argument():
@@ -221,13 +232,18 @@ def test_loaded_reverse_arc_requires_both_odom_targets_and_stops():
 def test_loaded_handoff_clearance_requires_no_lethal_or_outside_cells():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
+    reader = _function(tree, "_read_loaded_handoff_clearance")
     gate = _function(tree, "_wait_for_loaded_handoff_clearance")
+    reader_source = ast.get_source_segment(source, reader)
     gate_source = ast.get_source_segment(source, gate)
 
-    assert '"/global_costmap/costmap_raw"' in gate_source
-    assert '"/global_costmap/published_footprint"' in gate_source
-    assert "DurabilityPolicy.TRANSIENT_LOCAL" in gate_source
-    assert "analyze_costmap_start" in gate_source
+    assert '"/global_costmap/costmap_raw"' in reader_source
+    assert '"/global_costmap/published_footprint"' in reader_source
+    assert "DurabilityPolicy.TRANSIENT_LOCAL" in reader_source
+    assert "analyze_costmap_start" in reader_source
+    assert "destroy_subscription(costmap_subscription)" in reader_source
+    assert "destroy_subscription(footprint_subscription)" in reader_source
+    assert "_read_loaded_handoff_clearance" in gate_source
     assert 'analysis["footprint_lethal"]' in gate_source
     assert 'analysis["footprint_outside"]' in gate_source
     assert "if lethal or outside" in gate_source
