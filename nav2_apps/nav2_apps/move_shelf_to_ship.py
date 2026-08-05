@@ -225,6 +225,15 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-prealign-planner-id", default="GridBased"
     )
     parser.add_argument(
+        "--loaded-boundary-pair-diagnostic",
+        action="store_true",
+        help=(
+            "At the first stopped auto-start NO_PATH during loaded "
+            "prealignment, run one explicit-start pair and exit before "
+            "any further motion or navigation handoff."
+        ),
+    )
+    parser.add_argument(
         "--loaded-localization-samples", type=int, default=5
     )
     parser.add_argument(
@@ -1610,6 +1619,20 @@ def _prealign_loaded_shipping_bearing(
             return False
         if (
             probe_result is PathProbeResult.NO_PATH
+            and args.loaded_boundary_pair_diagnostic
+        ):
+            navigator.get_logger().warning(
+                "LOADED_BOUNDARY_PAIR_DIAGNOSTIC_TRIGGERED: "
+                "auto-start NO_PATH; no further prealignment motion"
+            )
+            result = _run_loaded_boundary_pair_diagnostic(args)
+            navigator.get_logger().warning(
+                "LOADED_BOUNDARY_PAIR_DIAGNOSTIC_COMPLETE: "
+                f"exit={result}; mission stops before handoff"
+            )
+            return False
+        if (
+            probe_result is PathProbeResult.NO_PATH
             and abs(error) <= tolerance
         ):
             navigator.get_logger().error(
@@ -1695,6 +1718,37 @@ def _prealign_loaded_shipping_bearing(
         "loaded shipping prealignment exhausted total yaw bound"
     )
     return False
+
+
+def _run_loaded_boundary_pair_diagnostic(
+    args: argparse.Namespace,
+) -> int:
+    """Run the verified planning-only pair at the current stopped boundary."""
+    from nav2_apps.explicit_start_pair_probe import ExplicitStartPairProbe
+
+    pair_args = argparse.Namespace(
+        frame_id=args.frame_id,
+        base_frame=args.base_frame,
+        action_name="/compute_path_to_pose",
+        costmap_topic="/global_costmap/costmap_raw",
+        cmd_vel_topic=args.cmd_vel_topic,
+        planner_id=args.loaded_prealign_planner_id,
+        goal_x=args.shipping_x,
+        goal_y=args.shipping_y,
+        goal_yaw=args.shipping_yaw,
+        tf_timeout=args.shipping_pose_lookup_timeout,
+        costmap_timeout=args.loaded_prealign_path_probe_timeout,
+        action_timeout=args.loaded_prealign_path_probe_timeout,
+        between_wait=0.5,
+        max_tf_position_delta=0.02,
+        max_tf_yaw_delta=0.02,
+        zero_twist_tolerance=1e-4,
+    )
+    node = ExplicitStartPairProbe(pair_args)
+    try:
+        return node.run()
+    finally:
+        node.destroy_node()
 
 
 def _settle_without_motion(

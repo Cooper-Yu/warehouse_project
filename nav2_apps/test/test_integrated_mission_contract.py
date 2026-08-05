@@ -198,6 +198,31 @@ def test_loaded_shipping_prealign_is_geometry_derived_segmented_and_guarded():
     assert "LOADED_SHIPPING_PREALIGN_COMPLETE" in prealign_source
 
 
+def test_loaded_boundary_pair_diagnostic_stops_before_more_motion():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    prealign = _function(tree, "_prealign_loaded_shipping_bearing")
+    prealign_source = ast.get_source_segment(source, prealign)
+    helper = _function(tree, "_run_loaded_boundary_pair_diagnostic")
+    helper_source = ast.get_source_segment(source, helper)
+
+    trigger = prealign_source.index(
+        "LOADED_BOUNDARY_PAIR_DIAGNOSTIC_TRIGGERED"
+    )
+    pair = prealign_source.index("_run_loaded_boundary_pair_diagnostic")
+    next_rotation = prealign_source.index("_bounded_rotate_by_odom")
+    assert trigger < pair < next_rotation
+    diagnostic_tail = prealign_source[pair:next_rotation]
+    assert "return False" in diagnostic_tail
+    assert "probe_result is PathProbeResult.NO_PATH" in prealign_source
+    assert "args.loaded_boundary_pair_diagnostic" in prealign_source
+    assert "ExplicitStartPairProbe" in helper_source
+    assert "node.run()" in helper_source
+    assert "node.destroy_node()" in helper_source
+    assert "goToPose" not in helper_source
+    assert "create_publisher" not in helper_source
+
+
 def test_prealign_reconfirmation_accepts_only_narrow_translation_boundary():
     class Monitor:
         last_position_jump = 0.212
