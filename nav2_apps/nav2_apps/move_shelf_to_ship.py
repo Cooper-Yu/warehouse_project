@@ -189,6 +189,15 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-egress-angular-speed", type=float, default=0.05
     )
     parser.add_argument(
+        "--loaded-egress-arc-distance", type=float, default=0.35
+    )
+    parser.add_argument(
+        "--loaded-egress-arc-yaw", type=float, default=0.18
+    )
+    parser.add_argument(
+        "--loaded-egress-arc-angular-speed", type=float, default=0.026
+    )
+    parser.add_argument(
         "--loaded-egress-motion-timeout", type=float, default=20.0
     )
     parser.add_argument(
@@ -1611,45 +1620,186 @@ def _bounded_forward_right_arc_by_odom(
         del listener
 
 
+def _bounded_reverse_arc_by_odom(
+    navigator: BasicNavigator,
+    cmd_vel_topic: str,
+    odom_frame: str,
+    base_frame: str,
+    target_distance: float,
+    target_yaw: float,
+    linear_speed: float,
+    angular_speed: float,
+    timeout: float,
+    lookup_timeout: float,
+    distance_tolerance: float,
+    yaw_tolerance: float,
+    label: str,
+) -> bool:
+    """Reverse on a signed-yaw arc until both odom targets are reached."""
+    import tf2_ros
+
+    if (
+        target_distance <= 0.0
+        or target_yaw == 0.0
+        or linear_speed <= 0.0
+        or angular_speed <= 0.0
+        or timeout <= 0.0
+        or lookup_timeout <= 0.0
+        or distance_tolerance < 0.0
+        or yaw_tolerance < 0.0
+    ):
+        navigator.get_logger().error(
+            f"invalid {label} reverse-arc parameters"
+        )
+        return False
+
+    publisher = navigator.create_publisher(Twist, cmd_vel_topic, 10)
+    buffer = tf2_ros.Buffer()
+    listener = tf2_ros.TransformListener(buffer, navigator, spin_thread=False)
+    deadline = time.monotonic() + timeout
+
+    def lookup():
+        try:
+            return buffer.lookup_transform(
+                odom_frame, base_frame, rclpy.time.Time()
+            )
+        except tf2_ros.TransformException:
+            return None
+
+    try:
+        start = None
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            start = lookup()
+            if start is not None:
+                break
+        if start is None:
+            navigator.get_logger().error(
+                f"{label} rejected: odom TF unavailable"
+            )
+            return False
+
+        previous_x = start.transform.translation.x
+        previous_y = start.transform.translation.y
+        last_yaw = _yaw_from_rotation(start.transform.rotation)
+        distance = 0.0
+        yaw_direction = math.copysign(1.0, target_yaw)
+        yaw_traveled = 0.0
+        last_tf_time = time.monotonic()
+        command = Twist()
+        command.linear.x = -linear_speed
+        command.angular.z = yaw_direction * angular_speed
+        navigator.get_logger().info(
+            f"bounded {label} started: distance={target_distance:.3f} "
+            f"yaw={target_yaw:.3f} linear={command.linear.x:.3f} "
+            f"angular={command.angular.z:.3f}"
+        )
+
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            current = lookup()
+            if current is None:
+                if time.monotonic() - last_tf_time >= lookup_timeout:
+                    navigator.get_logger().error(
+                        f"{label} stopped: odom TF stale"
+                    )
+                    return False
+                publisher.publish(command)
+                continue
+
+            last_tf_time = time.monotonic()
+            current_x = current.transform.translation.x
+            current_y = current.transform.translation.y
+            distance += math.hypot(
+                current_x - previous_x, current_y - previous_y
+            )
+            previous_x = current_x
+            previous_y = current_y
+            current_yaw = _yaw_from_rotation(current.transform.rotation)
+            delta = _normalize_angle(current_yaw - last_yaw)
+            last_yaw = current_yaw
+            yaw_traveled += yaw_direction * delta
+            if yaw_traveled < -yaw_tolerance:
+                navigator.get_logger().error(
+                    f"{label} stopped: wrong yaw direction"
+                )
+                return False
+
+            distance_done = distance >= max(
+                0.0, target_distance - distance_tolerance
+            )
+            yaw_done = yaw_traveled >= max(
+                0.0, abs(target_yaw) - yaw_tolerance
+            )
+            if distance_done and yaw_done:
+                navigator.get_logger().info(
+                    f"bounded {label} complete: "
+                    f"distance={distance:.3f}/{target_distance:.3f} "
+                    f"yaw={yaw_direction * yaw_traveled:.3f}/{target_yaw:.3f}"
+                )
+                return True
+            publisher.publish(command)
+
+        navigator.get_logger().error(
+            f"{label} timed out: distance={distance:.3f}/"
+            f"{target_distance:.3f} yaw={yaw_direction * yaw_traveled:.3f}/"
+            f"{target_yaw:.3f}"
+        )
+        return False
+    finally:
+        stop = Twist()
+        for _ in range(3):
+            publisher.publish(stop)
+            time.sleep(0.05)
+        navigator.destroy_publisher(publisher)
+        del listener
+
+
 def _loaded_egress_before_shipping(
     navigator: BasicNavigator, args: argparse.Namespace
 ) -> bool:
-    """Run one bounded fallback only after a direct path probe fails."""
+    """Create right-side clearance with one bounded reverse S-curve."""
     navigator.get_logger().info(
-        "loaded egress fallback: left 0.12 -> reverse 0.25 -> "
-        "one final path probe"
+        "loaded egress reverse S-curve: reverse-left 0.35/0.18 -> "
+        "reverse-right 0.35/0.18 before path probe"
     )
-    if not _bounded_rotate_by_odom(
+    if not _bounded_reverse_arc_by_odom(
         navigator,
         args.cmd_vel_topic,
         args.odom_frame,
         args.base_frame,
-        args.loaded_egress_first_turn_yaw,
-        args.loaded_egress_angular_speed,
-        args.loaded_egress_motion_timeout,
-        args.odom_lookup_timeout,
-        args.loaded_egress_yaw_tolerance,
-    ):
-        return False
-    if not _settle_without_motion(navigator, args.exit_settle):
-        return False
-    if not _bounded_reverse_by_odom(
-        navigator,
-        args.cmd_vel_topic,
-        args.odom_frame,
-        args.base_frame,
-        args.loaded_egress_initial_reverse,
+        args.loaded_egress_arc_distance,
+        args.loaded_egress_arc_yaw,
         args.loaded_egress_linear_speed,
+        args.loaded_egress_arc_angular_speed,
         args.loaded_egress_motion_timeout,
         args.odom_lookup_timeout,
-        args.exit_heading_tolerance,
-        args.exit_lateral_tolerance,
-        "loaded egress initial reverse",
+        args.exit_distance_tolerance,
+        args.loaded_egress_yaw_tolerance,
+        "loaded egress reverse-left arc",
     ):
         return False
     if not _settle_without_motion(navigator, args.exit_settle):
         return False
-    navigator.get_logger().info("LOADED_EGRESS_FALLBACK_COMPLETE")
+    if not _bounded_reverse_arc_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        args.loaded_egress_arc_distance,
+        -args.loaded_egress_arc_yaw,
+        args.loaded_egress_linear_speed,
+        args.loaded_egress_arc_angular_speed,
+        args.loaded_egress_motion_timeout,
+        args.odom_lookup_timeout,
+        args.exit_distance_tolerance,
+        args.loaded_egress_yaw_tolerance,
+        "loaded egress reverse-right arc",
+    ):
+        return False
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
+    navigator.get_logger().info("LOADED_EGRESS_REVERSE_S_COMPLETE")
     return True
 
 
@@ -1658,7 +1808,7 @@ def _prealign_loaded_shipping_bearing(
     args: argparse.Namespace,
     localization_monitor: _LoadedLocalizationMonitor,
 ) -> bool:
-    """Prefer direct Nav2; permit one bounded fallback and one retry."""
+    """Require one usable path after the bounded reverse S-curve."""
     shipping_pose = _pose(
         navigator,
         args.frame_id,
@@ -1680,42 +1830,8 @@ def _prealign_loaded_shipping_bearing(
         )
         return True
     if probe_result is PathProbeResult.NO_PATH:
-        navigator.get_logger().warning(
-            "LOADED_SHIPPING_DIRECT_NAV2_NO_PATH: starting one bounded "
-            "left-turn/reverse fallback"
-        )
-        if not _loaded_egress_before_shipping(navigator, args):
-            navigator.get_logger().error(
-                "LOADED_SHIPPING_FALLBACK_FAILED: no Nav2 handoff"
-            )
-            return False
-        if not _wait_for_loaded_localization_stability(
-            navigator,
-            localization_monitor,
-            args.loaded_localization_samples,
-            args.loaded_localization_sample_interval,
-            args.shipping_pose_lookup_timeout,
-        ):
-            return False
-        retry_result = _bounded_loaded_shipping_path_probe(
-            navigator,
-            shipping_pose,
-            args.loaded_prealign_planner_id,
-            args.loaded_prealign_path_probe_timeout,
-            args.loaded_prealign_path_end_tolerance,
-        )
-        if retry_result is PathProbeResult.PATH_READY:
-            navigator.get_logger().info(
-                "LOADED_SHIPPING_FALLBACK_NAV2_HANDOFF: usable path ready"
-            )
-            return True
-        if retry_result is PathProbeResult.NO_PATH:
-            navigator.get_logger().error(
-                "LOADED_SHIPPING_FALLBACK_NO_PATH: no further direct motion"
-            )
-            return False
         navigator.get_logger().error(
-            "LOADED_SHIPPING_FALLBACK_UNCERTAIN: retry unavailable"
+            "LOADED_SHIPPING_REVERSE_S_NO_PATH: no further direct motion"
         )
         return False
     navigator.get_logger().error(
@@ -2376,6 +2492,11 @@ def _run_integrated_mission(
         args.footprint_timeout,
         args.footprint_edge_tolerance,
     ):
+        return ExitCode.UNKNOWN
+    if not _loaded_egress_before_shipping(navigator, args):
+        navigator.get_logger().error(
+            "integrated mission stopped before shipping: reverse S failed"
+        )
         return ExitCode.UNKNOWN
     localization_monitor = _LoadedLocalizationMonitor(
         navigator,

@@ -54,6 +54,9 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_handoff_turn_timeout == 45.0
     assert args.loaded_egress_linear_speed == 0.05
     assert args.loaded_egress_angular_speed == 0.05
+    assert args.loaded_egress_arc_distance == 0.35
+    assert args.loaded_egress_arc_yaw == 0.18
+    assert args.loaded_egress_arc_angular_speed == 0.026
     assert args.loaded_prealign_max_segment_yaw == 0.15
     assert args.loaded_prealign_arc_max_distance == 0.12
     assert args.loaded_prealign_arc_linear_speed == 0.04
@@ -84,6 +87,7 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
     expected_calls = [
         "_request_stepwise_attach",
         "_apply_loaded_footprint_verified",
+        "_loaded_egress_before_shipping",
         "_wait_for_loaded_localization_stability",
         "_prealign_loaded_shipping_bearing",
         "_controller_speed_snapshot",
@@ -147,7 +151,7 @@ def test_loaded_localization_preflight_enforces_monotonic_sample_spacing():
     assert "monitor.last_yaw_jump" in gate_source
 
 
-def test_loaded_egress_fallback_is_one_bounded_turn_reverse_pair():
+def test_loaded_egress_is_one_bounded_reverse_s_curve():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     egress = _function(tree, "_loaded_egress_before_shipping")
@@ -157,24 +161,37 @@ def test_loaded_egress_fallback_is_one_bounded_turn_reverse_pair():
         node.func.id
         for node in ast.walk(egress)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id in {
-            "_bounded_rotate_by_odom", "_bounded_reverse_by_odom"
-        }
+        and node.func.id == "_bounded_reverse_arc_by_odom"
     ]
 
     assert calls == [
-        "_bounded_rotate_by_odom",
-        "_bounded_reverse_by_odom",
+        "_bounded_reverse_arc_by_odom",
+        "_bounded_reverse_arc_by_odom",
     ]
-    assert egress_source.count("_bounded_rotate_by_odom") == 1
-    assert egress_source.count("_bounded_reverse_by_odom") == 1
+    assert egress_source.count("_bounded_reverse_arc_by_odom") == 2
     assert egress_source.count("_settle_without_motion") == 2
-    assert '"loaded egress initial reverse"' in egress_source
-    assert '"loaded egress final reverse"' not in egress_source
-    assert '"loaded egress extra reverse"' not in egress_source
-    assert "left 0.12 -> reverse 0.25" in egress_source
-    assert "args.loaded_egress_first_turn_yaw" in egress_source
-    assert "LOADED_EGRESS_FALLBACK_COMPLETE" in egress_source
+    assert "reverse-left 0.35/0.18" in egress_source
+    assert "reverse-right 0.35/0.18" in egress_source
+    assert "args.loaded_egress_arc_distance" in egress_source
+    assert "args.loaded_egress_arc_yaw" in egress_source
+    assert "-args.loaded_egress_arc_yaw" in egress_source
+    assert "LOADED_EGRESS_REVERSE_S_COMPLETE" in egress_source
+
+
+def test_loaded_reverse_arc_requires_both_odom_targets_and_stops():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    arc = _function(tree, "_bounded_reverse_arc_by_odom")
+    arc_source = ast.get_source_segment(source, arc)
+
+    assert "command.linear.x = -linear_speed" in arc_source
+    assert "command.angular.z = yaw_direction * angular_speed" in arc_source
+    assert "distance += math.hypot" in arc_source
+    assert "yaw_traveled += yaw_direction * delta" in arc_source
+    assert "if distance_done and yaw_done" in arc_source
+    assert "wrong yaw direction" in arc_source
+    assert "finally:" in arc_source
+    assert "publisher.publish(stop)" in arc_source
 
 
 def test_loaded_egress_turn_uses_signed_odom_accumulation_and_stops():
@@ -206,7 +223,7 @@ def test_loaded_prealign_arc_is_forward_right_dual_bounded_and_stops():
     assert "publisher.publish(stop)" in arc_source
 
 
-def test_loaded_shipping_handoff_prefers_direct_path_then_one_fallback():
+def test_loaded_shipping_handoff_requires_post_s_curve_path():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     prealign = _function(tree, "_prealign_loaded_shipping_bearing")
@@ -216,12 +233,10 @@ def test_loaded_shipping_handoff_prefers_direct_path_then_one_fallback():
     assert "probe_result is PathProbeResult.PATH_READY" in prealign_source
     assert "probe_result is PathProbeResult.NO_PATH" in prealign_source
     assert "LOADED_SHIPPING_DIRECT_NAV2_HANDOFF" in prealign_source
-    assert "LOADED_SHIPPING_DIRECT_NAV2_NO_PATH" in prealign_source
+    assert "LOADED_SHIPPING_REVERSE_S_NO_PATH" in prealign_source
     assert "LOADED_SHIPPING_DIRECT_NAV2_UNCERTAIN" in prealign_source
-    assert "_loaded_egress_before_shipping" in prealign_source
-    assert "_wait_for_loaded_localization_stability" in prealign_source
-    assert "LOADED_SHIPPING_FALLBACK_NAV2_HANDOFF" in prealign_source
-    assert "LOADED_SHIPPING_FALLBACK_NO_PATH" in prealign_source
+    assert "_loaded_egress_before_shipping" not in prealign_source
+    assert "_wait_for_loaded_localization_stability" not in prealign_source
     assert "_bounded_forward_right_arc_by_odom" not in prealign_source
     assert "_bounded_rotate_by_odom" not in prealign_source
     assert "_bounded_reverse_by_odom" not in prealign_source
