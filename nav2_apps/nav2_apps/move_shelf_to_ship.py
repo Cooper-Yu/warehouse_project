@@ -27,8 +27,8 @@ from nav2_apps.result_gate import ExitCode, classify_task_result
 
 
 SIM_LOADED_FOOTPRINT = (
-    "[[0.40, 0.45], [-0.40, 0.45], "
-    "[-0.40, -0.45], [0.40, -0.45]]"
+    "[[0.40, 0.40], [-0.40, 0.40], "
+    "[-0.40, -0.40], [0.40, -0.40]]"
 )
 SIM_UNLOADED_FOOTPRINT = (
     "[[0.25, 0.25], [-0.25, 0.25], "
@@ -171,7 +171,7 @@ def _parser() -> argparse.ArgumentParser:
         "--shipping-pose-lookup-timeout", type=float, default=5.0
     )
     parser.add_argument(
-        "--loaded-egress-initial-reverse", type=float, default=0.50
+        "--loaded-egress-initial-reverse", type=float, default=0.25
     )
     parser.add_argument(
         "--loaded-egress-first-turn-yaw", type=float, default=0.12
@@ -1614,11 +1614,10 @@ def _bounded_forward_right_arc_by_odom(
 def _loaded_egress_before_shipping(
     navigator: BasicNavigator, args: argparse.Namespace
 ) -> bool:
-    """Open clearance with two turn/reverse pairs before Nav2 handoff."""
+    """Run one bounded fallback only after a direct path probe fails."""
     navigator.get_logger().info(
-        "loaded egress: left 0.12 -> reverse 0.50 -> left 0.16 -> "
-        "reverse 0.60 -> right (pi/2 + prior left yaw) before direct "
-        "Nav2 handoff"
+        "loaded egress fallback: left 0.12 -> reverse 0.25 -> "
+        "one final path probe"
     )
     if not _bounded_rotate_by_odom(
         navigator,
@@ -1650,61 +1649,7 @@ def _loaded_egress_before_shipping(
         return False
     if not _settle_without_motion(navigator, args.exit_settle):
         return False
-    if not _bounded_rotate_by_odom(
-        navigator,
-        args.cmd_vel_topic,
-        args.odom_frame,
-        args.base_frame,
-        args.loaded_egress_second_turn_yaw,
-        args.loaded_egress_angular_speed,
-        args.loaded_egress_motion_timeout,
-        args.odom_lookup_timeout,
-        args.loaded_egress_yaw_tolerance,
-    ):
-        return False
-    if not _settle_without_motion(navigator, args.exit_settle):
-        return False
-    if not _bounded_reverse_by_odom(
-        navigator,
-        args.cmd_vel_topic,
-        args.odom_frame,
-        args.base_frame,
-        args.loaded_egress_final_reverse,
-        args.loaded_egress_linear_speed,
-        args.loaded_egress_motion_timeout,
-        args.odom_lookup_timeout,
-        args.exit_heading_tolerance,
-        args.exit_lateral_tolerance,
-        "loaded egress final reverse",
-    ):
-        return False
-    if not _settle_without_motion(navigator, args.exit_settle):
-        return False
-    handoff_right_yaw = -(
-        args.loaded_egress_handoff_right_yaw
-        + args.loaded_egress_first_turn_yaw
-        + args.loaded_egress_second_turn_yaw
-    )
-    navigator.get_logger().info(
-        "loaded egress handoff right turn: "
-        f"target_yaw={handoff_right_yaw:.3f} "
-        "(base right pi/2 plus prior left yaw)"
-    )
-    if not _bounded_rotate_by_odom(
-        navigator,
-        args.cmd_vel_topic,
-        args.odom_frame,
-        args.base_frame,
-        handoff_right_yaw,
-        args.loaded_egress_handoff_angular_speed,
-        args.loaded_egress_handoff_turn_timeout,
-        args.odom_lookup_timeout,
-        args.loaded_egress_yaw_tolerance,
-    ):
-        return False
-    if not _settle_without_motion(navigator, args.exit_settle):
-        return False
-    navigator.get_logger().info("LOADED_EGRESS_COMPLETE")
+    navigator.get_logger().info("LOADED_EGRESS_FALLBACK_COMPLETE")
     return True
 
 
@@ -1713,8 +1658,7 @@ def _prealign_loaded_shipping_bearing(
     args: argparse.Namespace,
     localization_monitor: _LoadedLocalizationMonitor,
 ) -> bool:
-    """Require one usable loaded path, then hand control directly to Nav2."""
-    del localization_monitor
+    """Prefer direct Nav2; permit one bounded fallback and one retry."""
     shipping_pose = _pose(
         navigator,
         args.frame_id,
@@ -1736,8 +1680,42 @@ def _prealign_loaded_shipping_bearing(
         )
         return True
     if probe_result is PathProbeResult.NO_PATH:
+        navigator.get_logger().warning(
+            "LOADED_SHIPPING_DIRECT_NAV2_NO_PATH: starting one bounded "
+            "left-turn/reverse fallback"
+        )
+        if not _loaded_egress_before_shipping(navigator, args):
+            navigator.get_logger().error(
+                "LOADED_SHIPPING_FALLBACK_FAILED: no Nav2 handoff"
+            )
+            return False
+        if not _wait_for_loaded_localization_stability(
+            navigator,
+            localization_monitor,
+            args.loaded_localization_samples,
+            args.loaded_localization_sample_interval,
+            args.shipping_pose_lookup_timeout,
+        ):
+            return False
+        retry_result = _bounded_loaded_shipping_path_probe(
+            navigator,
+            shipping_pose,
+            args.loaded_prealign_planner_id,
+            args.loaded_prealign_path_probe_timeout,
+            args.loaded_prealign_path_end_tolerance,
+        )
+        if retry_result is PathProbeResult.PATH_READY:
+            navigator.get_logger().info(
+                "LOADED_SHIPPING_FALLBACK_NAV2_HANDOFF: usable path ready"
+            )
+            return True
+        if retry_result is PathProbeResult.NO_PATH:
+            navigator.get_logger().error(
+                "LOADED_SHIPPING_FALLBACK_NO_PATH: no further direct motion"
+            )
+            return False
         navigator.get_logger().error(
-            "LOADED_SHIPPING_DIRECT_NAV2_NO_PATH: no further direct motion"
+            "LOADED_SHIPPING_FALLBACK_UNCERTAIN: retry unavailable"
         )
         return False
     navigator.get_logger().error(
@@ -2399,12 +2377,6 @@ def _run_integrated_mission(
         args.footprint_edge_tolerance,
     ):
         return ExitCode.UNKNOWN
-    if not _loaded_egress_before_shipping(navigator, args):
-        navigator.get_logger().error(
-            "integrated mission stopped before shipping: loaded egress failed"
-        )
-        return ExitCode.UNKNOWN
-
     localization_monitor = _LoadedLocalizationMonitor(
         navigator,
         args.odom_frame,
