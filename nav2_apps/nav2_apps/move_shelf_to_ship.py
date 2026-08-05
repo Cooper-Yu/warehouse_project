@@ -3377,62 +3377,6 @@ def _run_integrated_mission(
         args.footprint_edge_tolerance,
     ):
         return ExitCode.UNKNOWN
-    frozen_map_odom = None
-    freeze_restore_ok = True
-    if args.loaded_egress_extreme_left_90_experiment:
-        frozen_map_odom = _freeze_map_to_odom(
-            navigator,
-            args.frame_id,
-            args.odom_frame,
-            args.shipping_pose_lookup_timeout,
-            args.loaded_map_odom_freeze_lifecycle_timeout,
-        )
-        if frozen_map_odom is None:
-            return ExitCode.UNKNOWN
-    try:
-        if args.loaded_egress_extreme_left_90_experiment:
-            egress_ready = _loaded_egress_extreme_left_90_experiment(
-                navigator, args
-            )
-        else:
-            egress_ready = _loaded_egress_before_shipping(navigator, args)
-    finally:
-        if frozen_map_odom is not None:
-            freeze_restore_ok = _restore_amcl_after_freeze(
-                navigator,
-                frozen_map_odom,
-                args.loaded_map_odom_freeze_lifecycle_timeout,
-            )
-    if not freeze_restore_ok:
-        return ExitCode.UNKNOWN
-    if not egress_ready:
-        navigator.get_logger().error(
-            "integrated mission stopped before shipping: reverse S failed"
-        )
-        return ExitCode.UNKNOWN
-    localization_monitor = _LoadedLocalizationMonitor(
-        navigator,
-        args.odom_frame,
-        args.base_frame,
-        args.loaded_localization_max_position_jump,
-        args.loaded_localization_max_yaw_jump,
-        enforce_jump_limits=(
-            not args.loaded_egress_extreme_left_90_experiment
-        ),
-    )
-    if args.loaded_egress_extreme_left_90_experiment:
-        navigator.get_logger().warning(
-            "LOADED_LOCALIZATION_JUMP_GATE_DISABLED_FOR_EXTREME_EXPERIMENT: "
-            "jumps remain logged; default route and real profile unchanged"
-        )
-    if not _wait_for_loaded_localization_stability(
-        navigator,
-        localization_monitor,
-        args.loaded_localization_samples,
-        args.loaded_localization_sample_interval,
-        args.shipping_pose_lookup_timeout,
-    ):
-        return ExitCode.UNKNOWN
     shipping_pose = _pose(
         navigator,
         args.frame_id,
@@ -3441,60 +3385,10 @@ def _run_integrated_mission(
         args.shipping_yaw,
     )
     if not args.loaded_egress_extreme_left_90_experiment:
-        if not _bounded_loaded_prehandoff_rotation(
-            navigator, args, shipping_pose, localization_monitor
-        ):
-            return ExitCode.UNKNOWN
-    if not _wait_for_loaded_handoff_clearance(
-        navigator, args.loaded_handoff_costmap_timeout
-    ):
-        return ExitCode.UNKNOWN
-    if not _prealign_loaded_shipping_bearing(
-        navigator, args, localization_monitor
-    ):
-        return ExitCode.UNKNOWN
-
-    original_speeds = _controller_speed_snapshot(
-        navigator, args.controller_parameter_timeout
-    )
-    if original_speeds is None:
-        navigator.get_logger().error(
-            "integrated mission stopped: controller speed snapshot failed"
+        navigator.get_logger().info(
+            "DIRECT_NAV2_HANDOFF_AFTER_LIFT: loaded footprint verified; "
+            "custom egress, prealignment, and localization jump gate skipped"
         )
-        return ExitCode.UNKNOWN
-    loaded_speeds = {
-        "FollowPath.max_vel_x": args.loaded_shipping_max_linear_speed,
-        "FollowPath.max_speed_xy": args.loaded_shipping_max_linear_speed,
-        "FollowPath.max_vel_theta": args.loaded_shipping_max_angular_speed,
-    }
-    if not _set_controller_speeds(
-        navigator, loaded_speeds, args.controller_parameter_timeout
-    ):
-        _set_controller_speeds(
-            navigator, original_speeds, args.controller_parameter_timeout
-        )
-        navigator.get_logger().error(
-            "integrated mission stopped: loaded speed limit rejected"
-        )
-        return ExitCode.UNKNOWN
-    if _controller_speed_snapshot(
-        navigator, args.controller_parameter_timeout
-    ) != loaded_speeds:
-        _set_controller_speeds(
-            navigator, original_speeds, args.controller_parameter_timeout
-        )
-        navigator.get_logger().error(
-            "integrated mission stopped: loaded speed readback mismatch"
-        )
-        return ExitCode.UNKNOWN
-    navigator.get_logger().info(
-        "LOADED_SHIPPING_SPEEDS_VERIFIED: "
-        f"linear={args.loaded_shipping_max_linear_speed:.3f} "
-        f"angular={args.loaded_shipping_max_angular_speed:.3f}"
-    )
-
-    speed_restore_verified = False
-    try:
         shipping_result = _navigate_to_shipping(
             navigator,
             shipping_pose,
@@ -3508,28 +3402,48 @@ def _run_integrated_mission(
             args.shipping_pose_lookup_timeout,
             args.shipping_yaw_correction_ratio,
             args.shipping_yaw_correction_rounds,
-            localization_monitor,
         )
-    finally:
-        restored = _set_controller_speeds(
-            navigator, original_speeds, args.controller_parameter_timeout
+    else:
+        navigator.get_logger().warning(
+            "EXTREME_LOADED_EGRESS_DIAGNOSTIC_SELECTED: default direct "
+            "Nav2 handoff is bypassed"
         )
-        restored_values = _controller_speed_snapshot(
-            navigator, args.controller_parameter_timeout
+        frozen_map_odom = _freeze_map_to_odom(
+            navigator,
+            args.frame_id,
+            args.odom_frame,
+            args.shipping_pose_lookup_timeout,
+            args.loaded_map_odom_freeze_lifecycle_timeout,
         )
-        speed_restore_verified = (
-            restored and restored_values == original_speeds
-        )
-        if not speed_restore_verified:
-            navigator.get_logger().error(
-                "controller speed restoration verification failed"
+        if frozen_map_odom is None:
+            return ExitCode.UNKNOWN
+        freeze_restore_ok = True
+        try:
+            egress_ready = _loaded_egress_extreme_left_90_experiment(
+                navigator, args
             )
-        else:
-            navigator.get_logger().info(
-                "CONTROLLER_SPEEDS_RESTORED"
+        finally:
+            freeze_restore_ok = _restore_amcl_after_freeze(
+                navigator,
+                frozen_map_odom,
+                args.loaded_map_odom_freeze_lifecycle_timeout,
             )
-    if not speed_restore_verified:
-        return ExitCode.UNKNOWN
+        if not freeze_restore_ok or not egress_ready:
+            return ExitCode.UNKNOWN
+        shipping_result = _navigate_to_shipping(
+            navigator,
+            shipping_pose,
+            args.shipping_timeout,
+            args.base_frame,
+            args.shipping_position_tolerance,
+            args.shipping_yaw_tolerance,
+            args.shipping_max_yaw_correction,
+            args.shipping_alignment_timeout,
+            args.shipping_alignment_settle,
+            args.shipping_pose_lookup_timeout,
+            args.shipping_yaw_correction_ratio,
+            args.shipping_yaw_correction_rounds,
+        )
     if shipping_result != ExitCode.SUCCEEDED:
         return shipping_result
 

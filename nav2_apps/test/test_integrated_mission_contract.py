@@ -111,12 +111,6 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
     expected_calls = [
         "_request_stepwise_attach",
         "_apply_loaded_footprint_verified",
-        "_loaded_egress_before_shipping",
-        "_wait_for_loaded_localization_stability",
-        "_wait_for_loaded_handoff_clearance",
-        "_prealign_loaded_shipping_bearing",
-        "_controller_speed_snapshot",
-        "_set_controller_speeds",
         "_navigate_to_shipping",
         "_bounded_forward_by_odom",
         "_publish_elevator_down_and_wait",
@@ -129,7 +123,27 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
     assert "integrated_mode = not any(operation_modes)" in source
     assert "integrated simulation mission will initialize AMCL" not in source
     assert "_wait_for_existing_localization" in source
-    assert "CONTROLLER_SPEEDS_RESTORED" in mission_source
+    assert "DIRECT_NAV2_HANDOFF_AFTER_LIFT" in mission_source
+
+
+def test_default_integrated_route_skips_custom_loaded_handoff_gates():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    mission_source = ast.get_source_segment(
+        source, _function(tree, "_run_integrated_mission")
+    )
+    default_branch = mission_source.split(
+        "if not args.loaded_egress_extreme_left_90_experiment:", 1
+    )[1].split("else:", 1)[0]
+
+    assert "_navigate_to_shipping" in default_branch
+    assert "_loaded_egress_before_shipping" not in default_branch
+    assert "_wait_for_loaded_localization_stability" not in default_branch
+    assert "_wait_for_loaded_handoff_clearance" not in default_branch
+    assert "_prealign_loaded_shipping_bearing" not in default_branch
+    assert "_bounded_loaded_prehandoff_rotation" not in default_branch
+    assert "_controller_speed_snapshot" not in default_branch
+    assert "_set_controller_speeds" not in default_branch
 
 
 def test_localization_step_rejects_translation_and_yaw_jumps():
@@ -195,14 +209,7 @@ def test_extreme_experiment_disables_only_localization_jump_enforcement():
         "LOADED_LOCALIZATION_JUMP_OBSERVED_NOT_ENFORCED"
         in monitor_source
     )
-    assert (
-        "not args.loaded_egress_extreme_left_90_experiment"
-        in mission_source
-    )
-    assert (
-        "LOADED_LOCALIZATION_JUMP_GATE_DISABLED_FOR_EXTREME_EXPERIMENT"
-        in mission_source
-    )
+    assert "DIRECT_NAV2_HANDOFF_AFTER_LIFT" in mission_source
 
 
 def test_extreme_experiment_freezes_map_odom_and_restores_amcl():
@@ -218,7 +225,11 @@ def test_extreme_experiment_freezes_map_odom_and_restores_amcl():
         source, _function(tree, "_restore_amcl_after_freeze")
     )
 
-    assert "if args.loaded_egress_extreme_left_90_experiment" in mission_source
+    assert (
+        "if not args.loaded_egress_extreme_left_90_experiment"
+        in mission_source
+    )
+    assert "EXTREME_LOADED_EGRESS_DIAGNOSTIC_SELECTED" in mission_source
     assert "_freeze_map_to_odom" in mission_source
     assert "try:" in mission_source
     assert "finally:" in mission_source
