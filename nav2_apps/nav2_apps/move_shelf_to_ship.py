@@ -8,7 +8,15 @@ import time
 from typing import List, Optional
 
 import rclpy
-from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped, Twist
+from geometry_msgs.msg import (
+    Point32,
+    PolygonStamped,
+    PoseStamped,
+    TransformStamped,
+    Twist,
+)
+from lifecycle_msgs.msg import State, Transition
+from lifecycle_msgs.srv import ChangeState, GetState
 from nav2_msgs.action import ComputePathToPose
 from nav2_msgs.msg import Costmap
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
@@ -18,6 +26,7 @@ from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.utilities import remove_ros_args
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
+from tf2_ros import TransformBroadcaster
 
 from nav2_apps.pose_config import (
     SIM_INIT_POSE,
@@ -346,6 +355,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--loaded-localization-max-yaw-jump", type=float, default=0.20
+    )
+    parser.add_argument(
+        "--loaded-map-odom-freeze-lifecycle-timeout",
+        type=float,
+        default=5.0,
     )
     parser.add_argument(
         "--loaded-shipping-max-linear-speed", type=float, default=0.15
@@ -837,6 +851,147 @@ class _LoadedLocalizationMonitor:
             )
             return True
         return stable
+
+
+def _amcl_state(navigator: BasicNavigator, timeout: float) -> Optional[int]:
+    client = navigator.create_client(GetState, "/amcl/get_state")
+    try:
+        if not client.wait_for_service(timeout_sec=timeout):
+            return None
+        future = client.call_async(GetState.Request())
+        rclpy.spin_until_future_complete(
+            navigator, future, timeout_sec=timeout
+        )
+        if not future.done() or future.result() is None:
+            return None
+        return future.result().current_state.id
+    finally:
+        navigator.destroy_client(client)
+
+
+def _change_amcl_state(
+    navigator: BasicNavigator,
+    transition_id: int,
+    expected_state: int,
+    timeout: float,
+) -> bool:
+    client = navigator.create_client(ChangeState, "/amcl/change_state")
+    try:
+        if not client.wait_for_service(timeout_sec=timeout):
+            navigator.get_logger().error("AMCL lifecycle service unavailable")
+            return False
+        request = ChangeState.Request()
+        request.transition.id = transition_id
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(
+            navigator, future, timeout_sec=timeout
+        )
+        if (
+            not future.done()
+            or future.result() is None
+            or not future.result().success
+        ):
+            navigator.get_logger().error(
+                f"AMCL lifecycle transition {transition_id} failed"
+            )
+            return False
+    finally:
+        navigator.destroy_client(client)
+    return _amcl_state(navigator, timeout) == expected_state
+
+
+class _FrozenMapOdom:
+    """Republish one captured map-to-odom transform while AMCL is inactive."""
+
+    def __init__(
+        self,
+        navigator: BasicNavigator,
+        transform,
+        publish_period: float = 0.05,
+    ) -> None:
+        self.navigator = navigator
+        self.transform = transform
+        self.broadcaster = TransformBroadcaster(navigator)
+        self.timer = navigator.create_timer(publish_period, self.publish)
+        self.publish()
+
+    def publish(self) -> None:
+        message = TransformStamped()
+        message.header.stamp = self.navigator.get_clock().now().to_msg()
+        message.header.frame_id = self.transform.header.frame_id
+        message.child_frame_id = self.transform.child_frame_id
+        message.transform = self.transform.transform
+        self.broadcaster.sendTransform(message)
+
+    def stop(self) -> None:
+        self.timer.cancel()
+        self.navigator.destroy_timer(self.timer)
+
+
+def _freeze_map_to_odom(
+    navigator: BasicNavigator,
+    map_frame: str,
+    odom_frame: str,
+    lookup_timeout: float,
+    lifecycle_timeout: float,
+) -> Optional[_FrozenMapOdom]:
+    import tf2_ros
+
+    buffer = tf2_ros.Buffer()
+    listener = tf2_ros.TransformListener(buffer, navigator, spin_thread=False)
+    deadline = time.monotonic() + lookup_timeout
+    captured = None
+    try:
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            try:
+                captured = buffer.lookup_transform(
+                    map_frame, odom_frame, rclpy.time.Time()
+                )
+                break
+            except tf2_ros.TransformException:
+                continue
+    finally:
+        del listener
+    if captured is None:
+        navigator.get_logger().error(
+            "MAP_ODOM_FREEZE_REJECTED: transform unavailable"
+        )
+        return None
+    if not _change_amcl_state(
+        navigator,
+        Transition.TRANSITION_DEACTIVATE,
+        State.PRIMARY_STATE_INACTIVE,
+        lifecycle_timeout,
+    ):
+        navigator.get_logger().error(
+            "MAP_ODOM_FREEZE_REJECTED: AMCL did not become inactive"
+        )
+        return None
+    frozen = _FrozenMapOdom(navigator, captured)
+    navigator.get_logger().warning(
+        "MAP_ODOM_FREEZE_ACTIVE: explicit simulation experiment only"
+    )
+    return frozen
+
+
+def _restore_amcl_after_freeze(
+    navigator: BasicNavigator,
+    frozen: _FrozenMapOdom,
+    lifecycle_timeout: float,
+) -> bool:
+    frozen.stop()
+    restored = _change_amcl_state(
+        navigator,
+        Transition.TRANSITION_ACTIVATE,
+        State.PRIMARY_STATE_ACTIVE,
+        lifecycle_timeout,
+    )
+    if restored:
+        navigator.get_logger().warning("MAP_ODOM_FREEZE_RELEASED_AMCL_ACTIVE")
+    else:
+        navigator.get_logger().error("MAP_ODOM_FREEZE_RELEASE_FAILED")
+    return restored
 
 
 def _wait_for_loaded_localization_stability(
@@ -3222,12 +3377,34 @@ def _run_integrated_mission(
         args.footprint_edge_tolerance,
     ):
         return ExitCode.UNKNOWN
+    frozen_map_odom = None
+    freeze_restore_ok = True
     if args.loaded_egress_extreme_left_90_experiment:
-        egress_ready = _loaded_egress_extreme_left_90_experiment(
-            navigator, args
+        frozen_map_odom = _freeze_map_to_odom(
+            navigator,
+            args.frame_id,
+            args.odom_frame,
+            args.shipping_pose_lookup_timeout,
+            args.loaded_map_odom_freeze_lifecycle_timeout,
         )
-    else:
-        egress_ready = _loaded_egress_before_shipping(navigator, args)
+        if frozen_map_odom is None:
+            return ExitCode.UNKNOWN
+    try:
+        if args.loaded_egress_extreme_left_90_experiment:
+            egress_ready = _loaded_egress_extreme_left_90_experiment(
+                navigator, args
+            )
+        else:
+            egress_ready = _loaded_egress_before_shipping(navigator, args)
+    finally:
+        if frozen_map_odom is not None:
+            freeze_restore_ok = _restore_amcl_after_freeze(
+                navigator,
+                frozen_map_odom,
+                args.loaded_map_odom_freeze_lifecycle_timeout,
+            )
+    if not freeze_restore_ok:
+        return ExitCode.UNKNOWN
     if not egress_ready:
         navigator.get_logger().error(
             "integrated mission stopped before shipping: reverse S failed"

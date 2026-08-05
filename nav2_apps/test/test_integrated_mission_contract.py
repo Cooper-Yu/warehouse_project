@@ -4,7 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
+from builtin_interfaces.msg import Time
+from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped, Transform
 from nav2_msgs.msg import Costmap
 from nav2_apps import move_shelf_to_ship
 
@@ -93,6 +94,7 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_localization_samples == 5
     assert args.loaded_localization_max_position_jump == 0.20
     assert args.loaded_localization_max_yaw_jump == 0.20
+    assert args.loaded_map_odom_freeze_lifecycle_timeout == 5.0
     assert args.loaded_shipping_max_linear_speed == 0.15
     assert args.loaded_shipping_max_angular_speed == 0.30
     assert args.exit_distance == 0.75
@@ -201,6 +203,68 @@ def test_extreme_experiment_disables_only_localization_jump_enforcement():
         "LOADED_LOCALIZATION_JUMP_GATE_DISABLED_FOR_EXTREME_EXPERIMENT"
         in mission_source
     )
+
+
+def test_extreme_experiment_freezes_map_odom_and_restores_amcl():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    mission_source = ast.get_source_segment(
+        source, _function(tree, "_run_integrated_mission")
+    )
+    freeze_source = ast.get_source_segment(
+        source, _function(tree, "_freeze_map_to_odom")
+    )
+    restore_source = ast.get_source_segment(
+        source, _function(tree, "_restore_amcl_after_freeze")
+    )
+
+    assert "if args.loaded_egress_extreme_left_90_experiment" in mission_source
+    assert "_freeze_map_to_odom" in mission_source
+    assert "try:" in mission_source
+    assert "finally:" in mission_source
+    assert "_restore_amcl_after_freeze" in mission_source
+    assert "Transition.TRANSITION_DEACTIVATE" in freeze_source
+    assert "State.PRIMARY_STATE_INACTIVE" in freeze_source
+    assert "Transition.TRANSITION_ACTIVATE" in restore_source
+    assert "State.PRIMARY_STATE_ACTIVE" in restore_source
+
+
+def test_frozen_map_odom_republishes_captured_transform(monkeypatch):
+    sent = []
+    timers = []
+
+    class Broadcaster:
+        def __init__(self, _node):
+            pass
+
+        def sendTransform(self, message):
+            sent.append(message)
+
+    monkeypatch.setattr(
+        move_shelf_to_ship, "TransformBroadcaster", Broadcaster
+    )
+    navigator = SimpleNamespace(
+        get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(to_msg=lambda: Time())
+        ),
+        create_timer=lambda period, callback: (
+            timers.append((period, callback))
+            or SimpleNamespace(cancel=lambda: None)
+        ),
+        destroy_timer=lambda _timer: None,
+    )
+    transform = SimpleNamespace(
+        header=SimpleNamespace(frame_id="map"),
+        child_frame_id="odom",
+        transform=Transform(),
+    )
+
+    frozen = move_shelf_to_ship._FrozenMapOdom(navigator, transform)
+    assert timers[0][0] == pytest.approx(0.05)
+    assert sent[0].header.frame_id == "map"
+    assert sent[0].child_frame_id == "odom"
+    assert sent[0].transform is transform.transform
+    frozen.stop()
 
 
 def test_loaded_egress_uses_bounded_adaptive_turn_reverse_loop():
