@@ -198,6 +198,9 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-egress-handoff-right-yaw", type=float, default=math.pi / 2.0
     )
     parser.add_argument(
+        "--loaded-egress-handoff-angular-speed", type=float, default=0.08
+    )
+    parser.add_argument(
         "--loaded-egress-handoff-turn-timeout", type=float, default=45.0
     )
     parser.add_argument(
@@ -1693,7 +1696,7 @@ def _loaded_egress_before_shipping(
         args.odom_frame,
         args.base_frame,
         handoff_right_yaw,
-        args.loaded_egress_angular_speed,
+        args.loaded_egress_handoff_angular_speed,
         args.loaded_egress_handoff_turn_timeout,
         args.odom_lookup_timeout,
         args.loaded_egress_yaw_tolerance,

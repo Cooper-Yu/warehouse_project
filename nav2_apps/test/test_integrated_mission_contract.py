@@ -46,6 +46,7 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_final_reverse == 0.60
     assert args.loaded_egress_second_turn_yaw == 0.16
     assert args.loaded_egress_handoff_right_yaw == pytest.approx(math.pi / 2.0)
+    assert args.loaded_egress_handoff_angular_speed == 0.08
     assert args.loaded_egress_handoff_turn_timeout == 45.0
     assert args.loaded_egress_linear_speed == 0.05
     assert args.loaded_egress_angular_speed == 0.05
@@ -176,6 +177,7 @@ def test_loaded_egress_is_bounded_and_ordered_before_shipping():
     assert "args.loaded_egress_first_turn_yaw" in egress_source
     assert "args.loaded_egress_second_turn_yaw" in egress_source
     assert "args.loaded_egress_handoff_right_yaw" in egress_source
+    assert "args.loaded_egress_handoff_angular_speed" in egress_source
     assert "args.loaded_egress_handoff_turn_timeout" in egress_source
     assert "handoff_right_yaw = -(" in egress_source
     assert "LOADED_EGRESS_COMPLETE" in egress_source
