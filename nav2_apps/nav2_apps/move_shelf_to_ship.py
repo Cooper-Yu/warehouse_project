@@ -180,6 +180,9 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-egress-final-reverse", type=float, default=0.25
     )
     parser.add_argument(
+        "--loaded-egress-extra-reverse", type=float, default=0.10
+    )
+    parser.add_argument(
         "--loaded-egress-linear-speed", type=float, default=0.05
     )
     parser.add_argument(
@@ -193,6 +196,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--loaded-prealign-max-segment-yaw", type=float, default=0.15
+    )
+    parser.add_argument(
+        "--loaded-prealign-arc-max-distance", type=float, default=0.12
+    )
+    parser.add_argument(
+        "--loaded-prealign-arc-linear-speed", type=float, default=0.04
     )
     parser.add_argument(
         "--loaded-prealign-max-total-yaw", type=float, default=2.80
@@ -1469,12 +1478,137 @@ def _bounded_rotate_by_odom(
         del listener
 
 
+def _bounded_forward_right_arc_by_odom(
+    navigator: BasicNavigator,
+    cmd_vel_topic: str,
+    odom_frame: str,
+    base_frame: str,
+    max_distance: float,
+    max_right_yaw: float,
+    linear_speed: float,
+    angular_speed: float,
+    timeout: float,
+    lookup_timeout: float,
+    yaw_tolerance: float,
+) -> bool:
+    """Move on a bounded forward-right arc, stopping at either limit."""
+    import tf2_ros
+
+    if (
+        max_distance <= 0.0
+        or max_right_yaw <= 0.0
+        or linear_speed <= 0.0
+        or angular_speed <= 0.0
+        or timeout <= 0.0
+        or lookup_timeout <= 0.0
+        or yaw_tolerance < 0.0
+    ):
+        navigator.get_logger().error(
+            "invalid loaded prealignment arc parameters"
+        )
+        return False
+
+    publisher = navigator.create_publisher(Twist, cmd_vel_topic, 10)
+    buffer = tf2_ros.Buffer()
+    listener = tf2_ros.TransformListener(buffer, navigator, spin_thread=False)
+    deadline = time.monotonic() + timeout
+
+    def lookup():
+        try:
+            return buffer.lookup_transform(
+                odom_frame, base_frame, rclpy.time.Time()
+            )
+        except tf2_ros.TransformException:
+            return None
+
+    start = None
+    try:
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            start = lookup()
+            if start is not None:
+                break
+        if start is None:
+            navigator.get_logger().error(
+                "loaded prealignment arc rejected: odom TF unavailable"
+            )
+            return False
+
+        start_x = start.transform.translation.x
+        start_y = start.transform.translation.y
+        last_yaw = _yaw_from_rotation(start.transform.rotation)
+        turned_right = 0.0
+        distance = 0.0
+        last_tf_time = time.monotonic()
+        command = Twist()
+        command.linear.x = linear_speed
+        command.angular.z = -angular_speed
+        navigator.get_logger().info(
+            "bounded loaded prealignment forward-right arc started: "
+            f"max_distance={max_distance:.3f} "
+            f"max_right_yaw={max_right_yaw:.3f} "
+            f"linear={linear_speed:.3f} angular={-angular_speed:.3f}"
+        )
+
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            current = lookup()
+            if current is None:
+                if time.monotonic() - last_tf_time >= lookup_timeout:
+                    navigator.get_logger().error(
+                        "loaded prealignment arc stopped: odom TF stale"
+                    )
+                    return False
+                publisher.publish(command)
+                continue
+
+            last_tf_time = time.monotonic()
+            current_x = current.transform.translation.x
+            current_y = current.transform.translation.y
+            distance = math.hypot(current_x - start_x, current_y - start_y)
+            current_yaw = _yaw_from_rotation(current.transform.rotation)
+            delta = _normalize_angle(current_yaw - last_yaw)
+            last_yaw = current_yaw
+            turned_right += -delta
+            distance_done = distance >= max_distance
+            yaw_done = turned_right >= max(
+                0.0, max_right_yaw - yaw_tolerance
+            )
+            if distance_done or yaw_done:
+                navigator.get_logger().info(
+                    "bounded loaded prealignment forward-right arc complete: "
+                    f"distance={distance:.3f}/{max_distance:.3f} "
+                    f"right_yaw={turned_right:.3f}/{max_right_yaw:.3f}"
+                )
+                return True
+            if turned_right < -yaw_tolerance:
+                navigator.get_logger().error(
+                    "loaded prealignment arc stopped: wrong yaw direction"
+                )
+                return False
+            publisher.publish(command)
+
+        navigator.get_logger().error(
+            "loaded prealignment arc timed out: "
+            f"distance={distance:.3f} right_yaw={turned_right:.3f}"
+        )
+        return False
+    finally:
+        stop = Twist()
+        for _ in range(3):
+            publisher.publish(stop)
+            time.sleep(0.05)
+        navigator.destroy_publisher(publisher)
+        del listener
+
+
 def _loaded_egress_before_shipping(
     navigator: BasicNavigator, args: argparse.Namespace
 ) -> bool:
     """Open the rear-right escape direction before loaded retreat."""
     navigator.get_logger().info(
-        "loaded egress: small left turn -> reverse -> reverse before shipping"
+        "loaded egress: small left turn -> reverse -> reverse -> extra "
+        "reverse before shipping"
     )
     if not _bounded_rotate_by_odom(
         navigator,
@@ -1522,6 +1656,22 @@ def _loaded_egress_before_shipping(
         return False
     if not _settle_without_motion(navigator, args.exit_settle):
         return False
+    if not _bounded_reverse_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        args.loaded_egress_extra_reverse,
+        args.loaded_egress_linear_speed,
+        args.loaded_egress_motion_timeout,
+        args.odom_lookup_timeout,
+        args.exit_heading_tolerance,
+        args.exit_lateral_tolerance,
+        "loaded egress extra reverse",
+    ):
+        return False
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
     navigator.get_logger().info("LOADED_EGRESS_COMPLETE")
     return True
 
@@ -1551,6 +1701,8 @@ def _prealign_loaded_shipping_bearing(
         or args.loaded_prealign_path_probe_timeout <= 0.0
         or args.loaded_prealign_path_end_tolerance < 0.0
         or args.loaded_prealign_path_handoff_max_bearing < tolerance
+        or args.loaded_prealign_arc_max_distance <= 0.0
+        or args.loaded_prealign_arc_linear_speed <= 0.0
         or not args.loaded_prealign_planner_id
     ):
         navigator.get_logger().error(
@@ -1642,8 +1794,14 @@ def _prealign_loaded_shipping_bearing(
             )
             return False
 
-        segment = math.copysign(min(abs(error), max_segment), error)
-        if requested_total + abs(segment) > max_total:
+        if error >= 0.0:
+            navigator.get_logger().error(
+                "loaded shipping prealignment rejected: "
+                "left arc is not authorized"
+            )
+            return False
+        segment = min(abs(error), max_segment)
+        if requested_total + segment > max_total:
             navigator.get_logger().error(
                 "loaded shipping prealignment rejected: total yaw bound "
                 f"would be exceeded requested={requested_total:.3f} "
@@ -1653,21 +1811,23 @@ def _prealign_loaded_shipping_bearing(
         navigator.get_logger().info(
             "loaded shipping prealignment segment: "
             f"bearing={bearing:.3f} current_yaw={current_yaw:.3f} "
-            f"error={error:.3f} command={segment:.3f}"
+            f"error={error:.3f} right_arc_yaw={segment:.3f}"
         )
-        if not _bounded_rotate_by_odom(
+        if not _bounded_forward_right_arc_by_odom(
             navigator,
             args.cmd_vel_topic,
             args.odom_frame,
             args.base_frame,
+            args.loaded_prealign_arc_max_distance,
             segment,
+            args.loaded_prealign_arc_linear_speed,
             args.loaded_egress_angular_speed,
             args.loaded_egress_motion_timeout,
             args.odom_lookup_timeout,
             args.loaded_egress_yaw_tolerance,
         ):
             return False
-        requested_total += abs(segment)
+        requested_total += segment
         if not _settle_without_motion(navigator, args.exit_settle):
             return False
         if not _wait_for_loaded_localization_stability(

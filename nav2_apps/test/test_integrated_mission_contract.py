@@ -42,9 +42,12 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_initial_reverse == 0.20
     assert args.loaded_egress_turn_yaw == 0.12
     assert args.loaded_egress_final_reverse == 0.25
+    assert args.loaded_egress_extra_reverse == 0.10
     assert args.loaded_egress_linear_speed == 0.05
     assert args.loaded_egress_angular_speed == 0.05
     assert args.loaded_prealign_max_segment_yaw == 0.15
+    assert args.loaded_prealign_arc_max_distance == 0.12
+    assert args.loaded_prealign_arc_linear_speed == 0.04
     assert args.loaded_prealign_max_total_yaw == 2.80
     assert args.loaded_prealign_bearing_tolerance == 0.20
     assert args.loaded_prealign_max_confirmable_position_jump == 0.23
@@ -147,11 +150,12 @@ def test_loaded_egress_is_bounded_and_ordered_before_shipping():
     second_reverse = egress_source.rindex("_bounded_reverse_by_odom")
 
     assert turn < first_reverse < second_reverse
-    assert egress_source.count("_bounded_reverse_by_odom") == 2
-    assert egress_source.count("_settle_without_motion") == 3
+    assert egress_source.count("_bounded_reverse_by_odom") == 3
+    assert egress_source.count("_settle_without_motion") == 4
     assert '"loaded egress initial reverse"' in egress_source
     assert '"loaded egress final reverse"' in egress_source
-    assert "small left turn -> reverse -> reverse" in egress_source
+    assert '"loaded egress extra reverse"' in egress_source
+    assert "small left turn -> reverse -> reverse -> extra" in egress_source
     assert "LOADED_EGRESS_COMPLETE" in egress_source
 
 
@@ -168,6 +172,22 @@ def test_loaded_egress_turn_uses_signed_odom_accumulation_and_stops():
     assert "publisher.publish(stop)" in turn_source
 
 
+def test_loaded_prealign_arc_is_forward_right_dual_bounded_and_stops():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    arc = _function(tree, "_bounded_forward_right_arc_by_odom")
+    arc_source = ast.get_source_segment(source, arc)
+
+    assert "command.linear.x = linear_speed" in arc_source
+    assert "command.angular.z = -angular_speed" in arc_source
+    assert "math.hypot(current_x - start_x" in arc_source
+    assert "turned_right += -delta" in arc_source
+    assert "if distance_done or yaw_done" in arc_source
+    assert "wrong yaw direction" in arc_source
+    assert "finally:" in arc_source
+    assert "publisher.publish(stop)" in arc_source
+
+
 def test_loaded_shipping_prealign_is_geometry_derived_segmented_and_guarded():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -179,8 +199,9 @@ def test_loaded_shipping_prealign_is_geometry_derived_segmented_and_guarded():
     assert "args.shipping_x - current_x" in prealign_source
     assert "_normalize_angle(bearing - current_yaw)" in prealign_source
     assert "min(abs(error), max_segment)" in prealign_source
-    assert "requested_total + abs(segment) > max_total" in prealign_source
-    assert "_bounded_rotate_by_odom" in prealign_source
+    assert "requested_total + segment > max_total" in prealign_source
+    assert "_bounded_forward_right_arc_by_odom" in prealign_source
+    assert "left arc is not authorized" in prealign_source
     assert "_settle_without_motion" in prealign_source
     assert "_wait_for_loaded_localization_stability" in prealign_source
     assert "_prealign_localization_reconfirmation_allowed" in prealign_source
@@ -211,9 +232,11 @@ def test_loaded_boundary_pair_diagnostic_stops_before_more_motion():
         "LOADED_BOUNDARY_PAIR_DIAGNOSTIC_TRIGGERED"
     )
     pair = prealign_source.index("_run_loaded_boundary_pair_diagnostic")
-    next_rotation = prealign_source.index("_bounded_rotate_by_odom")
-    assert trigger < pair < next_rotation
-    diagnostic_tail = prealign_source[pair:next_rotation]
+    next_motion = prealign_source.index(
+        "_bounded_forward_right_arc_by_odom"
+    )
+    assert trigger < pair < next_motion
+    diagnostic_tail = prealign_source[pair:next_motion]
     assert "return False" in diagnostic_tail
     assert "probe_result is PathProbeResult.NO_PATH" in prealign_source
     assert "args.loaded_boundary_pair_diagnostic" in prealign_source
