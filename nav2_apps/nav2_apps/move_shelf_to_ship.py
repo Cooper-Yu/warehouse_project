@@ -171,22 +171,16 @@ def _parser() -> argparse.ArgumentParser:
         "--shipping-pose-lookup-timeout", type=float, default=5.0
     )
     parser.add_argument(
-        "--loaded-egress-initial-reverse", type=float, default=0.20
+        "--loaded-egress-initial-reverse", type=float, default=0.50
     )
     parser.add_argument(
-        "--loaded-egress-first-turn-yaw", type=float, default=0.08
+        "--loaded-egress-first-turn-yaw", type=float, default=0.12
     )
     parser.add_argument(
-        "--loaded-egress-final-reverse", type=float, default=0.30
+        "--loaded-egress-final-reverse", type=float, default=0.60
     )
     parser.add_argument(
-        "--loaded-egress-second-turn-yaw", type=float, default=0.12
-    )
-    parser.add_argument(
-        "--loaded-egress-extra-reverse", type=float, default=0.40
-    )
-    parser.add_argument(
-        "--loaded-egress-third-turn-yaw", type=float, default=0.16
+        "--loaded-egress-second-turn-yaw", type=float, default=0.16
     )
     parser.add_argument(
         "--loaded-egress-linear-speed", type=float, default=0.05
@@ -1611,10 +1605,10 @@ def _bounded_forward_right_arc_by_odom(
 def _loaded_egress_before_shipping(
     navigator: BasicNavigator, args: argparse.Namespace
 ) -> bool:
-    """Open clearance with three progressively larger turn/reverse pairs."""
+    """Open clearance with two turn/reverse pairs before Nav2 handoff."""
     navigator.get_logger().info(
-        "loaded egress: left 0.08 -> reverse 0.20 -> left 0.12 -> "
-        "reverse 0.30 -> left 0.16 -> reverse 0.40 before shipping"
+        "loaded egress: left 0.12 -> reverse 0.50 -> left 0.16 -> "
+        "reverse 0.60 before direct Nav2 handoff"
     )
     if not _bounded_rotate_by_odom(
         navigator,
@@ -1676,36 +1670,6 @@ def _loaded_egress_before_shipping(
         return False
     if not _settle_without_motion(navigator, args.exit_settle):
         return False
-    if not _bounded_rotate_by_odom(
-        navigator,
-        args.cmd_vel_topic,
-        args.odom_frame,
-        args.base_frame,
-        args.loaded_egress_third_turn_yaw,
-        args.loaded_egress_angular_speed,
-        args.loaded_egress_motion_timeout,
-        args.odom_lookup_timeout,
-        args.loaded_egress_yaw_tolerance,
-    ):
-        return False
-    if not _settle_without_motion(navigator, args.exit_settle):
-        return False
-    if not _bounded_reverse_by_odom(
-        navigator,
-        args.cmd_vel_topic,
-        args.odom_frame,
-        args.base_frame,
-        args.loaded_egress_extra_reverse,
-        args.loaded_egress_linear_speed,
-        args.loaded_egress_motion_timeout,
-        args.odom_lookup_timeout,
-        args.exit_heading_tolerance,
-        args.exit_lateral_tolerance,
-        "loaded egress extra reverse",
-    ):
-        return False
-    if not _settle_without_motion(navigator, args.exit_settle):
-        return False
     navigator.get_logger().info("LOADED_EGRESS_COMPLETE")
     return True
 
@@ -1715,7 +1679,45 @@ def _prealign_loaded_shipping_bearing(
     args: argparse.Namespace,
     localization_monitor: _LoadedLocalizationMonitor,
 ) -> bool:
-    """Reduce the fresh-map shipping bearing error in guarded odom segments."""
+    """Require one usable loaded path, then hand control directly to Nav2."""
+    del localization_monitor
+    shipping_pose = _pose(
+        navigator,
+        args.frame_id,
+        args.shipping_x,
+        args.shipping_y,
+        args.shipping_yaw,
+    )
+    probe_result = _bounded_loaded_shipping_path_probe(
+        navigator,
+        shipping_pose,
+        args.loaded_prealign_planner_id,
+        args.loaded_prealign_path_probe_timeout,
+        args.loaded_prealign_path_end_tolerance,
+    )
+    if probe_result is PathProbeResult.PATH_READY:
+        navigator.get_logger().info(
+            "LOADED_SHIPPING_DIRECT_NAV2_HANDOFF: usable path ready; "
+            "no direct prealignment arc"
+        )
+        return True
+    if probe_result is PathProbeResult.NO_PATH:
+        navigator.get_logger().error(
+            "LOADED_SHIPPING_DIRECT_NAV2_NO_PATH: no further direct motion"
+        )
+        return False
+    navigator.get_logger().error(
+        "LOADED_SHIPPING_DIRECT_NAV2_UNCERTAIN: path probe unavailable"
+    )
+    return False
+
+
+def _legacy_prealign_loaded_shipping_bearing(
+    navigator: BasicNavigator,
+    args: argparse.Namespace,
+    localization_monitor: _LoadedLocalizationMonitor,
+) -> bool:
+    """Retained reference implementation; no longer called by the mission."""
     max_segment = args.loaded_prealign_max_segment_yaw
     max_total = args.loaded_prealign_max_total_yaw
     tolerance = args.loaded_prealign_bearing_tolerance

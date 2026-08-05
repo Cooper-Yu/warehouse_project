@@ -39,12 +39,10 @@ def test_no_mission_flags_selects_integrated_course_route():
 
     assert not any(operation_modes)
     assert args.shipping_refine_distance == 0.16
-    assert args.loaded_egress_initial_reverse == 0.20
-    assert args.loaded_egress_first_turn_yaw == 0.08
-    assert args.loaded_egress_final_reverse == 0.30
-    assert args.loaded_egress_second_turn_yaw == 0.12
-    assert args.loaded_egress_extra_reverse == 0.40
-    assert args.loaded_egress_third_turn_yaw == 0.16
+    assert args.loaded_egress_initial_reverse == 0.50
+    assert args.loaded_egress_first_turn_yaw == 0.12
+    assert args.loaded_egress_final_reverse == 0.60
+    assert args.loaded_egress_second_turn_yaw == 0.16
     assert args.loaded_egress_linear_speed == 0.05
     assert args.loaded_egress_angular_speed == 0.05
     assert args.loaded_prealign_max_segment_yaw == 0.15
@@ -161,20 +159,17 @@ def test_loaded_egress_is_bounded_and_ordered_before_shipping():
         "_bounded_reverse_by_odom",
         "_bounded_rotate_by_odom",
         "_bounded_reverse_by_odom",
-        "_bounded_rotate_by_odom",
-        "_bounded_reverse_by_odom",
     ]
-    assert egress_source.count("_bounded_rotate_by_odom") == 3
-    assert egress_source.count("_bounded_reverse_by_odom") == 3
-    assert egress_source.count("_settle_without_motion") == 6
+    assert egress_source.count("_bounded_rotate_by_odom") == 2
+    assert egress_source.count("_bounded_reverse_by_odom") == 2
+    assert egress_source.count("_settle_without_motion") == 4
     assert '"loaded egress initial reverse"' in egress_source
     assert '"loaded egress final reverse"' in egress_source
-    assert '"loaded egress extra reverse"' in egress_source
-    assert "left 0.08 -> reverse 0.20 -> left 0.12" in egress_source
-    assert "reverse 0.30 -> left 0.16 -> reverse 0.40" in egress_source
+    assert '"loaded egress extra reverse"' not in egress_source
+    assert "left 0.12 -> reverse 0.50 -> left 0.16" in egress_source
+    assert "reverse 0.60 before direct Nav2 handoff" in egress_source
     assert "args.loaded_egress_first_turn_yaw" in egress_source
     assert "args.loaded_egress_second_turn_yaw" in egress_source
-    assert "args.loaded_egress_third_turn_yaw" in egress_source
     assert "LOADED_EGRESS_COMPLETE" in egress_source
 
 
@@ -207,42 +202,28 @@ def test_loaded_prealign_arc_is_forward_right_dual_bounded_and_stops():
     assert "publisher.publish(stop)" in arc_source
 
 
-def test_loaded_shipping_prealign_is_geometry_derived_segmented_and_guarded():
+def test_loaded_shipping_handoff_requires_path_and_has_no_direct_motion():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     prealign = _function(tree, "_prealign_loaded_shipping_bearing")
     prealign_source = ast.get_source_segment(source, prealign)
 
-    assert "math.atan2" in prealign_source
-    assert "args.shipping_y - current_y" in prealign_source
-    assert "args.shipping_x - current_x" in prealign_source
-    assert "_normalize_angle(bearing - current_yaw)" in prealign_source
-    assert "min(abs(error), max_segment)" in prealign_source
-    assert "requested_total + segment > max_total" in prealign_source
-    assert "_bounded_forward_right_arc_by_odom" in prealign_source
-    assert "left arc is not authorized" in prealign_source
-    assert "_settle_without_motion" in prealign_source
-    assert "_wait_for_loaded_localization_stability" in prealign_source
-    assert "_prealign_localization_reconfirmation_allowed" in prealign_source
     assert "_bounded_loaded_shipping_path_probe" in prealign_source
-    assert "args.loaded_prealign_path_handoff_max_bearing" in prealign_source
-    assert "loaded shipping path ready but bearing remains outside" in (
-        prealign_source
-    )
     assert "probe_result is PathProbeResult.PATH_READY" in prealign_source
     assert "probe_result is PathProbeResult.NO_PATH" in prealign_source
-    assert "probe_result is PathProbeResult.UNCERTAIN" in prealign_source
-    assert "LOADED_SHIPPING_NO_PATH_AT_ALIGNED_HEADING" in prealign_source
-    assert "if abs(error) <= tolerance" not in prealign_source
-    assert "LOADED_PREALIGN_LOCALIZATION_RECONFIRM" in prealign_source
-    assert "LOADED_PREALIGN_LOCALIZATION_RECONFIRMED" in prealign_source
-    assert "LOADED_SHIPPING_PREALIGN_COMPLETE" in prealign_source
+    assert "LOADED_SHIPPING_DIRECT_NAV2_HANDOFF" in prealign_source
+    assert "LOADED_SHIPPING_DIRECT_NAV2_NO_PATH" in prealign_source
+    assert "LOADED_SHIPPING_DIRECT_NAV2_UNCERTAIN" in prealign_source
+    assert "_bounded_forward_right_arc_by_odom" not in prealign_source
+    assert "_bounded_rotate_by_odom" not in prealign_source
+    assert "_bounded_reverse_by_odom" not in prealign_source
+    assert "create_publisher" not in prealign_source
 
 
 def test_loaded_boundary_pair_diagnostic_stops_before_more_motion():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
-    prealign = _function(tree, "_prealign_loaded_shipping_bearing")
+    prealign = _function(tree, "_legacy_prealign_loaded_shipping_bearing")
     prealign_source = ast.get_source_segment(source, prealign)
     helper = _function(tree, "_run_loaded_boundary_pair_diagnostic")
     helper_source = ast.get_source_segment(source, helper)
