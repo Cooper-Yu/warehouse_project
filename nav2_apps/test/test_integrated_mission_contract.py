@@ -58,6 +58,7 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_arc_yaw == 0.18
     assert args.loaded_egress_arc_angular_speed == 0.026
     assert args.loaded_egress_arc_distance_tolerance == 0.01
+    assert args.loaded_handoff_costmap_timeout == 5.0
     assert args.loaded_prealign_max_segment_yaw == 0.15
     assert args.loaded_prealign_arc_max_distance == 0.12
     assert args.loaded_prealign_arc_linear_speed == 0.04
@@ -90,6 +91,7 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
         "_apply_loaded_footprint_verified",
         "_loaded_egress_before_shipping",
         "_wait_for_loaded_localization_stability",
+        "_wait_for_loaded_handoff_clearance",
         "_prealign_loaded_shipping_bearing",
         "_controller_speed_snapshot",
         "_set_controller_speeds",
@@ -171,11 +173,14 @@ def test_loaded_egress_is_one_bounded_reverse_s_curve():
     ]
     assert egress_source.count("_bounded_reverse_arc_by_odom") == 2
     assert egress_source.count("_settle_without_motion") == 2
-    assert "reverse-left 0.35/0.18" in egress_source
     assert "reverse-right 0.35/0.18" in egress_source
+    assert "reverse-left 0.35/0.18" in egress_source
     assert "args.loaded_egress_arc_distance" in egress_source
     assert "args.loaded_egress_arc_yaw" in egress_source
     assert "-args.loaded_egress_arc_yaw" in egress_source
+    assert egress_source.index("-args.loaded_egress_arc_yaw") < (
+        egress_source.index("args.loaded_egress_arc_yaw", 1)
+    )
     assert "LOADED_EGRESS_REVERSE_S_COMPLETE" in egress_source
 
 
@@ -211,6 +216,23 @@ def test_loaded_reverse_arc_requires_both_odom_targets_and_stops():
     assert "wrong yaw direction" in arc_source
     assert "finally:" in arc_source
     assert "publisher.publish(stop)" in arc_source
+
+
+def test_loaded_handoff_clearance_requires_no_lethal_or_outside_cells():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    gate = _function(tree, "_wait_for_loaded_handoff_clearance")
+    gate_source = ast.get_source_segment(source, gate)
+
+    assert '"/global_costmap/costmap_raw"' in gate_source
+    assert '"/global_costmap/published_footprint"' in gate_source
+    assert "DurabilityPolicy.TRANSIENT_LOCAL" in gate_source
+    assert "analyze_costmap_start" in gate_source
+    assert 'analysis["footprint_lethal"]' in gate_source
+    assert 'analysis["footprint_outside"]' in gate_source
+    assert "if lethal or outside" in gate_source
+    assert "LOADED_HANDOFF_CLEARANCE_BLOCKED" in gate_source
+    assert "LOADED_HANDOFF_CLEARANCE_READY" in gate_source
 
 
 def test_loaded_egress_turn_uses_signed_odom_accumulation_and_stops():
