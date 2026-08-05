@@ -56,6 +56,13 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_handoff_turn_timeout == 45.0
     assert args.loaded_egress_linear_speed == 0.05
     assert args.loaded_egress_angular_speed == 0.05
+    assert args.loaded_egress_turn_step == 0.10
+    assert args.loaded_egress_reverse_step == 0.05
+    assert args.loaded_egress_max_total_yaw == 0.90
+    assert args.loaded_egress_max_total_reverse == 1.00
+    assert args.loaded_egress_max_reverse_per_round == 0.25
+    assert args.loaded_egress_max_rounds == 12
+    assert args.loaded_egress_no_improvement_limit == 2
     assert args.loaded_egress_arc_distance == 0.35
     assert args.loaded_egress_arc_yaw == 0.18
     assert args.loaded_egress_arc_angular_speed == 0.026
@@ -162,7 +169,7 @@ def test_loaded_localization_preflight_enforces_monotonic_sample_spacing():
     assert "monitor.last_yaw_jump" in gate_source
 
 
-def test_loaded_egress_uses_bounded_clearance_checked_stages():
+def test_loaded_egress_uses_bounded_adaptive_turn_reverse_loop():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     egress = _function(tree, "_loaded_egress_before_shipping")
@@ -181,25 +188,29 @@ def test_loaded_egress_uses_bounded_clearance_checked_stages():
         and node.func.id == "_bounded_reverse_by_odom"
     ]
 
-    assert move_shelf_to_ship.LOADED_EGRESS_STAGES == (
-        (0.10, 0.15),
-        (0.15, 0.20),
-        (0.20, 0.25),
-        (0.25, 0.30),
-    )
-    assert "for index, (yaw, distance) in enumerate(" in egress_source
-    assert "LOADED_EGRESS_STAGES, start=1" in egress_source
+    assert move_shelf_to_ship.LOADED_EGRESS_TURN_STEP == 0.10
+    assert move_shelf_to_ship.LOADED_EGRESS_REVERSE_STEP == 0.05
+    assert "for round_index in range(" in egress_source
+    assert "args.loaded_egress_max_rounds + 1" in egress_source
     assert rotate_calls == ["_bounded_rotate_by_odom"]
     assert reverse_calls == ["_bounded_reverse_by_odom"]
     assert egress_source.count("_settle_without_motion") == 2
     assert "_loaded_dynamic_handoff_ready" in egress_source
-    assert "if readiness is None" in egress_source
-    assert "if readiness:" in egress_source
-    assert "total_yaw > 0.90" in egress_source
-    assert "total_reverse > 0.90" in egress_source
-    assert "LOADED_EGRESS_STAGE_RESULT" in egress_source
+    assert "_loaded_turn_segment_safe" in egress_source
+    assert "turn = args.loaded_egress_turn_step" in egress_source
+    assert "math.copysign" not in egress_source
+    assert "_read_loaded_current_risk" in egress_source
+    assert "current <= baseline" in egress_source
+    assert "current < previous" in egress_source
+    assert "previous = current" in egress_source
+    assert "current[1] == 0" in egress_source
+    assert "args.loaded_egress_max_total_yaw" in egress_source
+    assert "args.loaded_egress_max_total_reverse" in egress_source
+    assert "args.loaded_egress_max_reverse_per_round" in egress_source
+    assert "args.loaded_egress_no_improvement_limit" in egress_source
     assert "LOADED_EGRESS_CLEARANCE_READY" in egress_source
-    assert "LOADED_EGRESS_CLEARANCE_EXHAUSTED" in egress_source
+    assert "LOADED_EGRESS_NO_IMPROVEMENT" in egress_source
+    assert "LOADED_EGRESS_ROUNDS_EXHAUSTED" in egress_source
 
 
 def test_loaded_egress_namespace_contract_has_every_referenced_argument():
@@ -218,6 +229,132 @@ def test_loaded_egress_namespace_contract_has_every_referenced_argument():
     missing = sorted(name for name in referenced if not hasattr(args, name))
 
     assert missing == []
+
+
+def test_loaded_egress_turns_then_reverses_until_lethal_risk_recovers(
+    monkeypatch,
+):
+    risks = iter(
+        (
+            (0, 0, 8, 100),
+            (0, 2, 8, 254),
+            (0, 1, 8, 254),
+            (0, 0, 8, 100),
+            (0, 0, 8, 100),
+        )
+    )
+    readiness = iter((False, True))
+    rotations = []
+    reverses = []
+
+    monkeypatch.setattr(move_shelf_to_ship, "_pose", lambda *_args: object())
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_read_loaded_current_risk",
+        lambda *_args: next(risks),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_loaded_dynamic_handoff_ready",
+        lambda _navigator, _args, _pose, output: (
+            output.append({"yaw_delta": 1.0}) or next(readiness)
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_loaded_turn_segment_safe", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_rotate_by_odom",
+        lambda _navigator, _topic, _odom, _base, yaw, *_rest: (
+            rotations.append(yaw) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_reverse_by_odom",
+        lambda _navigator, _topic, _odom, _base, distance, *_rest: (
+            reverses.append(distance) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_settle_without_motion", lambda *_args: True
+    )
+
+    class Logger:
+        def info(self, _message):
+            pass
+
+        def error(self, _message):
+            pass
+
+    navigator = SimpleNamespace(get_logger=lambda: Logger())
+    args = move_shelf_to_ship._parser().parse_args([])
+
+    assert move_shelf_to_ship._loaded_egress_before_shipping(navigator, args)
+    assert rotations == pytest.approx([0.10])
+    assert reverses == pytest.approx([0.05, 0.05])
+
+
+def test_loaded_egress_blocked_turn_reverses_without_rotating(monkeypatch):
+    risks = iter(
+        (
+            (0, 0, 8, 100),
+            (0, 0, 8, 100),
+            (0, 0, 8, 100),
+        )
+    )
+    readiness = iter((False, True))
+    rotations = []
+    reverses = []
+
+    monkeypatch.setattr(move_shelf_to_ship, "_pose", lambda *_args: object())
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_read_loaded_current_risk",
+        lambda *_args: next(risks),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_loaded_dynamic_handoff_ready",
+        lambda _navigator, _args, _pose, output: (
+            output.append({"yaw_delta": 1.0}) or next(readiness)
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_loaded_turn_segment_safe", lambda *_args: False
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_rotate_by_odom",
+        lambda _navigator, _topic, _odom, _base, yaw, *_rest: (
+            rotations.append(yaw) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_reverse_by_odom",
+        lambda _navigator, _topic, _odom, _base, distance, *_rest: (
+            reverses.append(distance) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_settle_without_motion", lambda *_args: True
+    )
+
+    class Logger:
+        def info(self, _message):
+            pass
+
+        def error(self, _message):
+            pass
+
+    navigator = SimpleNamespace(get_logger=lambda: Logger())
+    args = move_shelf_to_ship._parser().parse_args([])
+
+    assert move_shelf_to_ship._loaded_egress_before_shipping(navigator, args)
+    assert rotations == []
+    assert reverses == pytest.approx([0.05])
 
 
 def test_loaded_reverse_arc_requires_both_odom_targets_and_stops():
@@ -257,6 +394,25 @@ def test_loaded_handoff_clearance_requires_no_lethal_or_outside_cells():
     assert 'result["footprint_outside"]' in gate_source
     assert "LOADED_HANDOFF_CLEARANCE_BLOCKED" in gate_source
     assert "LOADED_HANDOFF_CLEARANCE_READY" in gate_source
+
+
+def test_loaded_risk_prioritizes_outside_then_lethal_then_margin():
+    assert (0, 0, 120, 168) < (0, 1, 10, 0)
+    assert (0, 0, 80, 168) < (0, 0, 120, 102)
+    assert (0, 0, 80, 102) < (1, 0, 0, 0)
+
+
+def test_loaded_turn_segment_checks_only_requested_prefix_on_two_costmaps():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    helper = _function(tree, "_loaded_turn_segment_safe")
+    helper_source = ast.get_source_segment(source, helper)
+
+    assert "yaw_delta" in helper_source
+    assert 'for prefix in ("global", "local")' in helper_source
+    assert "_swept_clearance_analysis" in helper_source
+    assert 'analysis["footprint_lethal"]' in helper_source
+    assert 'analysis["footprint_outside"]' in helper_source
 
 
 def test_loaded_dynamic_handoff_requires_path_bearing_and_two_sweeps():

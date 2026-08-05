@@ -37,12 +37,8 @@ SIM_UNLOADED_FOOTPRINT = (
     "[[0.25, 0.25], [-0.25, 0.25], "
     "[-0.25, -0.25], [0.25, -0.25]]"
 )
-LOADED_EGRESS_STAGES = (
-    (0.10, 0.15),
-    (0.15, 0.20),
-    (0.20, 0.25),
-    (0.25, 0.30),
-)
+LOADED_EGRESS_TURN_STEP = 0.10
+LOADED_EGRESS_REVERSE_STEP = 0.05
 
 
 class PathProbeResult(Enum):
@@ -196,6 +192,31 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--loaded-egress-angular-speed", type=float, default=0.05
+    )
+    parser.add_argument(
+        "--loaded-egress-turn-step",
+        type=float,
+        default=LOADED_EGRESS_TURN_STEP,
+    )
+    parser.add_argument(
+        "--loaded-egress-reverse-step",
+        type=float,
+        default=LOADED_EGRESS_REVERSE_STEP,
+    )
+    parser.add_argument(
+        "--loaded-egress-max-total-yaw", type=float, default=0.90
+    )
+    parser.add_argument(
+        "--loaded-egress-max-total-reverse", type=float, default=1.00
+    )
+    parser.add_argument(
+        "--loaded-egress-max-reverse-per-round", type=float, default=0.25
+    )
+    parser.add_argument(
+        "--loaded-egress-max-rounds", type=int, default=12
+    )
+    parser.add_argument(
+        "--loaded-egress-no-improvement-limit", type=int, default=2
     )
     parser.add_argument(
         "--loaded-egress-arc-distance", type=float, default=0.35
@@ -1794,80 +1815,157 @@ def _bounded_reverse_arc_by_odom(
 def _loaded_egress_before_shipping(
     navigator: BasicNavigator, args: argparse.Namespace
 ) -> bool:
-    """Increase left yaw and reverse in bounded clearance-checked stages."""
+    """Adapt left turns and reverse steps using live costmap risk."""
     navigator.get_logger().info(
-        "loaded egress staged clearance: "
-        "left/reverse 0.10/0.15 -> 0.15/0.20 -> "
-        "0.20/0.25 -> 0.25/0.30"
+        "loaded egress adaptive clearance: precheck left turn, then reverse "
+        "in risk-reducing steps"
     )
+    if (
+        args.loaded_egress_turn_step <= 0.0
+        or args.loaded_egress_reverse_step <= 0.0
+        or args.loaded_egress_max_total_yaw <= 0.0
+        or args.loaded_egress_max_total_reverse <= 0.0
+        or args.loaded_egress_max_reverse_per_round <= 0.0
+        or args.loaded_egress_max_rounds <= 0
+        or args.loaded_egress_no_improvement_limit <= 0
+    ):
+        navigator.get_logger().error(
+            "LOADED_EGRESS_ADAPTIVE_UNCERTAIN: invalid limits"
+        )
+        return False
     total_yaw = 0.0
     total_reverse = 0.0
-    for index, (yaw, distance) in enumerate(LOADED_EGRESS_STAGES, start=1):
-        total_yaw += yaw
-        total_reverse += distance
-        if total_yaw > 0.90 + 1e-9 or total_reverse > 0.90 + 1e-9:
-            navigator.get_logger().error(
-                "LOADED_EGRESS_STAGE_LIMIT_REJECTED: "
-                f"yaw={total_yaw:.3f} reverse={total_reverse:.3f}"
-            )
-            return False
-        if not _bounded_rotate_by_odom(
-            navigator,
-            args.cmd_vel_topic,
-            args.odom_frame,
-            args.base_frame,
-            yaw,
-            args.loaded_egress_angular_speed,
-            args.loaded_egress_motion_timeout,
-            args.odom_lookup_timeout,
-            args.loaded_egress_yaw_tolerance,
-        ):
-            return False
-        if not _settle_without_motion(navigator, args.exit_settle):
-            return False
-        if not _bounded_reverse_by_odom(
-            navigator,
-            args.cmd_vel_topic,
-            args.odom_frame,
-            args.base_frame,
-            distance,
-            args.loaded_egress_linear_speed,
-            args.loaded_egress_motion_timeout,
-            args.odom_lookup_timeout,
-            args.exit_heading_tolerance,
-            args.exit_lateral_tolerance,
-            f"loaded egress stage {index} reverse",
-        ):
-            return False
-        if not _settle_without_motion(navigator, args.exit_settle):
-            return False
-
-        shipping_pose = _pose(
-            navigator,
-            args.frame_id,
-            args.shipping_x,
-            args.shipping_y,
-            args.shipping_yaw,
+    shipping_pose = _pose(
+        navigator,
+        args.frame_id,
+        args.shipping_x,
+        args.shipping_y,
+        args.shipping_yaw,
+    )
+    for round_index in range(1, args.loaded_egress_max_rounds + 1):
+        risk = _read_loaded_current_risk(
+            navigator, args.loaded_handoff_costmap_timeout
         )
+        if risk is None or risk[0] != 0:
+            return False
+        assessments = []
         readiness = _loaded_dynamic_handoff_ready(
-            navigator, args, shipping_pose
+            navigator, args, shipping_pose, assessments
         )
-        if readiness is None:
+        if readiness is None or not assessments:
             return False
-        navigator.get_logger().info(
-            f"LOADED_EGRESS_STAGE_RESULT: stage={index} "
-            f"total_yaw={total_yaw:.3f} total_reverse={total_reverse:.3f} "
-            f"dynamic_ready={readiness}"
-        )
         if readiness:
             navigator.get_logger().info(
-                f"LOADED_EGRESS_CLEARANCE_READY: stage={index}"
+                "LOADED_EGRESS_CLEARANCE_READY: "
+                f"round={round_index} yaw={total_yaw:.3f} "
+                f"reverse={total_reverse:.3f}"
             )
             return True
 
-    navigator.get_logger().error(
-        "LOADED_EGRESS_CLEARANCE_EXHAUSTED: four stages completed"
-    )
+        turn = args.loaded_egress_turn_step
+        turn_safe = _loaded_turn_segment_safe(
+            navigator, args, turn
+        )
+        turned = False
+        if turn_safe is None:
+            return False
+        if turn_safe:
+            if total_yaw + abs(turn) > (
+                args.loaded_egress_max_total_yaw + 1e-9
+            ):
+                navigator.get_logger().error(
+                    "LOADED_EGRESS_YAW_LIMIT_REJECTED"
+                )
+                return False
+            if not _bounded_rotate_by_odom(
+                navigator,
+                args.cmd_vel_topic,
+                args.odom_frame,
+                args.base_frame,
+                turn,
+                args.loaded_egress_angular_speed,
+                args.loaded_egress_motion_timeout,
+                args.odom_lookup_timeout,
+                args.loaded_egress_yaw_tolerance,
+            ):
+                return False
+            total_yaw += abs(turn)
+            turned = True
+            if not _settle_without_motion(navigator, args.exit_settle):
+                return False
+        else:
+            navigator.get_logger().info(
+                "LOADED_EGRESS_TURN_DEFERRED: next segment blocked; "
+                "reverse first"
+            )
+
+        baseline = risk
+        previous = baseline
+        if turned:
+            previous = _read_loaded_current_risk(
+                navigator, args.loaded_handoff_costmap_timeout
+            )
+            if previous is None or previous[0] != 0:
+                return False
+        reverse_this_round = 0.0
+        no_improvement = 0
+        while reverse_this_round + 1e-9 < (
+            args.loaded_egress_max_reverse_per_round
+        ):
+            if total_reverse + args.loaded_egress_reverse_step > (
+                args.loaded_egress_max_total_reverse + 1e-9
+            ):
+                navigator.get_logger().error(
+                    "LOADED_EGRESS_REVERSE_LIMIT_REJECTED"
+                )
+                return False
+            if not _bounded_reverse_by_odom(
+                navigator,
+                args.cmd_vel_topic,
+                args.odom_frame,
+                args.base_frame,
+                args.loaded_egress_reverse_step,
+                args.loaded_egress_linear_speed,
+                args.loaded_egress_motion_timeout,
+                args.odom_lookup_timeout,
+                args.exit_heading_tolerance,
+                args.exit_lateral_tolerance,
+                f"loaded adaptive egress round {round_index}",
+            ):
+                return False
+            total_reverse += args.loaded_egress_reverse_step
+            reverse_this_round += args.loaded_egress_reverse_step
+            if not _settle_without_motion(navigator, args.exit_settle):
+                return False
+            current = _read_loaded_current_risk(
+                navigator, args.loaded_handoff_costmap_timeout
+            )
+            if current is None or current[0] != 0:
+                return False
+            if current < previous:
+                no_improvement = 0
+            else:
+                no_improvement += 1
+            navigator.get_logger().info(
+                "LOADED_EGRESS_RISK_RESULT: "
+                f"round={round_index} turned={turned} "
+                f"baseline={baseline} current={current} "
+                f"round_reverse={reverse_this_round:.3f}"
+            )
+            if current <= baseline and current[1] == 0:
+                break
+            if no_improvement >= args.loaded_egress_no_improvement_limit:
+                navigator.get_logger().error(
+                    "LOADED_EGRESS_NO_IMPROVEMENT"
+                )
+                return False
+            previous = current
+        else:
+            navigator.get_logger().error(
+                "LOADED_EGRESS_ROUND_REVERSE_EXHAUSTED"
+            )
+            return False
+    navigator.get_logger().error("LOADED_EGRESS_ROUNDS_EXHAUSTED")
     return False
 
 
@@ -2008,6 +2106,67 @@ def _swept_clearance_analysis(
     worst["blocked_sample"] = None
     worst["sample_count"] = sample_count
     return worst
+
+
+def _loaded_costmap_risk(messages: dict) -> tuple:
+    """Return lexicographic outside/lethal/inscribed/start-cost risk."""
+    results = []
+    for prefix in ("global", "local"):
+        footprint = messages[f"{prefix}_footprint"]
+        points = list(footprint.polygon.points)
+        center_x = sum(float(point.x) for point in points) / len(points)
+        center_y = sum(float(point.y) for point in points) / len(points)
+        results.append(
+            analyze_costmap_start(
+                messages[f"{prefix}_costmap"],
+                points,
+                (center_x, center_y, 0.0),
+            )
+        )
+    return (
+        max(result["footprint_outside"] for result in results),
+        max(result["footprint_lethal"] for result in results),
+        max(result["footprint_inscribed"] for result in results),
+        max(
+            -1 if result["start_cost"] is None else result["start_cost"]
+            for result in results
+        ),
+    )
+
+
+def _read_loaded_current_risk(
+    navigator: BasicNavigator, timeout: float
+) -> Optional[tuple]:
+    messages = _read_loaded_handoff_clearance(navigator, timeout)
+    if messages is None:
+        return None
+    risk = _loaded_costmap_risk(messages)
+    navigator.get_logger().info(f"LOADED_EGRESS_CURRENT_RISK: {risk}")
+    return risk
+
+
+def _loaded_turn_segment_safe(
+    navigator: BasicNavigator,
+    args: argparse.Namespace,
+    yaw_delta: float,
+) -> Optional[bool]:
+    messages = _read_loaded_handoff_clearance(
+        navigator, args.loaded_handoff_costmap_timeout
+    )
+    if messages is None:
+        return None
+    for prefix in ("global", "local"):
+        analysis = _swept_clearance_analysis(
+            messages[f"{prefix}_costmap"],
+            messages[f"{prefix}_footprint"],
+            yaw_delta,
+            args.loaded_handoff_sweep_step,
+        )
+        if analysis is None:
+            return None
+        if analysis["footprint_lethal"] or analysis["footprint_outside"]:
+            return False
+    return True
 
 
 def _loaded_dynamic_handoff_ready(
