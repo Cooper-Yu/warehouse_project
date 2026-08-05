@@ -3,7 +3,8 @@ import math
 from pathlib import Path
 
 import pytest
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
+from nav2_msgs.msg import Costmap
 from nav2_apps import move_shelf_to_ship
 
 
@@ -59,6 +60,8 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_arc_angular_speed == 0.026
     assert args.loaded_egress_arc_distance_tolerance == 0.01
     assert args.loaded_handoff_costmap_timeout == 5.0
+    assert args.loaded_handoff_sweep_step == 0.05
+    assert args.loaded_handoff_path_lookahead == 0.30
     assert args.loaded_prealign_max_segment_yaw == 0.15
     assert args.loaded_prealign_arc_max_distance == 0.12
     assert args.loaded_prealign_arc_linear_speed == 0.04
@@ -184,10 +187,9 @@ def test_loaded_egress_uses_bounded_clearance_checked_stages():
     assert rotate_calls == ["_bounded_rotate_by_odom"]
     assert reverse_calls == ["_bounded_reverse_by_odom"]
     assert egress_source.count("_settle_without_motion") == 2
-    assert "_read_loaded_handoff_clearance" in egress_source
-    assert 'analysis["footprint_lethal"]' in egress_source
-    assert 'analysis["footprint_outside"]' in egress_source
-    assert "if lethal == 0 and outside == 0" in egress_source
+    assert "_loaded_dynamic_handoff_ready" in egress_source
+    assert "if readiness is None" in egress_source
+    assert "if readiness:" in egress_source
     assert "total_yaw > 0.90" in egress_source
     assert "total_reverse > 0.90" in egress_source
     assert "LOADED_EGRESS_STAGE_RESULT" in egress_source
@@ -239,16 +241,84 @@ def test_loaded_handoff_clearance_requires_no_lethal_or_outside_cells():
 
     assert '"/global_costmap/costmap_raw"' in reader_source
     assert '"/global_costmap/published_footprint"' in reader_source
+    assert '"/local_costmap/costmap_raw"' in reader_source
+    assert '"/local_costmap/published_footprint"' in reader_source
     assert "DurabilityPolicy.TRANSIENT_LOCAL" in reader_source
-    assert "analyze_costmap_start" in reader_source
-    assert "destroy_subscription(costmap_subscription)" in reader_source
-    assert "destroy_subscription(footprint_subscription)" in reader_source
+    assert "for subscription in subscriptions" in reader_source
+    assert "destroy_subscription(subscription)" in reader_source
     assert "_read_loaded_handoff_clearance" in gate_source
-    assert 'analysis["footprint_lethal"]' in gate_source
-    assert 'analysis["footprint_outside"]' in gate_source
-    assert "if lethal or outside" in gate_source
+    assert "analyze_costmap_start" in gate_source
+    assert 'result["footprint_lethal"]' in gate_source
+    assert 'result["footprint_outside"]' in gate_source
     assert "LOADED_HANDOFF_CLEARANCE_BLOCKED" in gate_source
     assert "LOADED_HANDOFF_CLEARANCE_READY" in gate_source
+
+
+def test_loaded_dynamic_handoff_requires_path_bearing_and_two_sweeps():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    gate = _function(tree, "_loaded_dynamic_handoff_ready")
+    gate_source = ast.get_source_segment(source, gate)
+
+    assert "_read_loaded_handoff_clearance" in gate_source
+    assert "_bounded_loaded_shipping_path_probe" in gate_source
+    assert "result is PathProbeResult.NO_PATH" in gate_source
+    assert "result is PathProbeResult.UNCERTAIN" in gate_source
+    assert "_initial_path_bearing" in gate_source
+    assert "_lookup_fresh_transform" in gate_source
+    assert "_normalize_angle(path_bearing - current_yaw)" in gate_source
+    assert 'for prefix in ("global", "local")' in gate_source
+    assert "_swept_clearance_analysis" in gate_source
+    assert "LOADED_DYNAMIC_HANDOFF_RESULT" in gate_source
+
+
+def test_swept_clearance_samples_every_intermediate_yaw_and_fails_closed():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    sweep = _function(tree, "_swept_clearance_analysis")
+    sweep_source = ast.get_source_segment(source, sweep)
+
+    assert "math.ceil(abs(yaw_delta) / sweep_step)" in sweep_source
+    assert "for index in range(sample_count + 1)" in sweep_source
+    assert "_rotated_footprint" in sweep_source
+    assert "analyze_costmap_start" in sweep_source
+    assert 'analysis["footprint_lethal"]' in sweep_source
+    assert 'analysis["footprint_outside"]' in sweep_source
+    assert 'worst["blocked_sample"] = index' in sweep_source
+
+
+def test_swept_clearance_detects_lethal_cell_only_entered_mid_turn():
+    costmap = Costmap()
+    costmap.metadata.resolution = 0.1
+    costmap.metadata.size_x = 50
+    costmap.metadata.size_y = 50
+    costmap.metadata.origin.position.x = 0.0
+    costmap.metadata.origin.position.y = 0.0
+    costmap.data = [0] * (50 * 50)
+    costmap.data[30 * 50 + 27] = 254
+
+    footprint = PolygonStamped()
+    for x, y in (
+        (3.1, 2.7),
+        (1.9, 2.7),
+        (1.9, 2.3),
+        (3.1, 2.3),
+    ):
+        point = Point32()
+        point.x = x
+        point.y = y
+        footprint.polygon.points.append(point)
+
+    start = move_shelf_to_ship._swept_clearance_analysis(
+        costmap, footprint, 0.0, 0.05
+    )
+    swept = move_shelf_to_ship._swept_clearance_analysis(
+        costmap, footprint, math.pi / 2.0, 0.05
+    )
+
+    assert start["footprint_lethal"] == 0
+    assert swept["footprint_lethal"] == 1
+    assert swept["blocked_sample"] not in (None, 0, swept["sample_count"])
 
 
 def test_loaded_egress_turn_uses_signed_odom_accumulation_and_stops():
@@ -361,6 +431,7 @@ def test_loaded_path_probe_is_bounded_and_never_starts_navigation():
     assert "ComputePathToPose.Goal()" in probe_source
     assert "request.use_start = False" in probe_source
     assert "request.planner_id = planner_id" in probe_source
+    assert "path_output.append(path)" in probe_source
     assert "time.monotonic() + timeout" in probe_source
     assert "goal_handle.cancel_goal_async()" in probe_source
     assert "GoalStatus.STATUS_SUCCEEDED" in probe_source

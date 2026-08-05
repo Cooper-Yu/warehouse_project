@@ -8,7 +8,7 @@ import time
 from typing import List, Optional
 
 import rclpy
-from geometry_msgs.msg import PolygonStamped, PoseStamped, Twist
+from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped, Twist
 from nav2_msgs.action import ComputePathToPose
 from nav2_msgs.msg import Costmap
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
@@ -211,6 +211,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--loaded-handoff-costmap-timeout", type=float, default=5.0
+    )
+    parser.add_argument(
+        "--loaded-handoff-sweep-step", type=float, default=0.05
+    )
+    parser.add_argument(
+        "--loaded-handoff-path-lookahead", type=float, default=0.30
     )
     parser.add_argument(
         "--loaded-egress-motion-timeout", type=float, default=20.0
@@ -857,6 +863,7 @@ def _bounded_loaded_shipping_path_probe(
     planner_id: str,
     timeout: float,
     endpoint_tolerance: float,
+    path_output: Optional[list] = None,
 ) -> PathProbeResult:
     """Classify the stopped planning probe without commanding motion."""
     if timeout <= 0.0 or endpoint_tolerance < 0.0 or not planner_id:
@@ -941,6 +948,8 @@ def _bounded_loaded_shipping_path_probe(
     navigator.get_logger().info(
         f"LOADED_PATH_PROBE_READY: poses={len(path.poses)}"
     )
+    if path_output is not None:
+        path_output.append(path)
     return PathProbeResult.PATH_READY
 
 
@@ -1821,19 +1830,24 @@ def _loaded_egress_before_shipping(
         if not _settle_without_motion(navigator, args.exit_settle):
             return False
 
-        analysis = _read_loaded_handoff_clearance(
-            navigator, args.loaded_handoff_costmap_timeout
+        shipping_pose = _pose(
+            navigator,
+            args.frame_id,
+            args.shipping_x,
+            args.shipping_y,
+            args.shipping_yaw,
         )
-        if analysis is None:
+        readiness = _loaded_dynamic_handoff_ready(
+            navigator, args, shipping_pose
+        )
+        if readiness is None:
             return False
-        lethal = analysis["footprint_lethal"]
-        outside = analysis["footprint_outside"]
         navigator.get_logger().info(
             f"LOADED_EGRESS_STAGE_RESULT: stage={index} "
             f"total_yaw={total_yaw:.3f} total_reverse={total_reverse:.3f} "
-            f"lethal={lethal} outside={outside}"
+            f"dynamic_ready={readiness}"
         )
-        if lethal == 0 and outside == 0:
+        if readiness:
             navigator.get_logger().info(
                 f"LOADED_EGRESS_CLEARANCE_READY: stage={index}"
             )
@@ -1849,67 +1863,212 @@ def _read_loaded_handoff_clearance(
     navigator: BasicNavigator,
     timeout: float,
 ) -> Optional[dict]:
-    """Return one received global costmap/footprint clearance analysis."""
+    """Return synchronized global/local costmaps and loaded footprints."""
     if timeout <= 0.0:
         navigator.get_logger().error(
             "LOADED_HANDOFF_CLEARANCE_UNCERTAIN: invalid timeout"
         )
         return None
 
-    costmap = None
-    footprint = None
+    messages = {
+        "global_costmap": None,
+        "global_footprint": None,
+        "local_costmap": None,
+        "local_footprint": None,
+    }
 
-    def capture_costmap(message):
-        nonlocal costmap
-        costmap = message
-
-    def capture_footprint(message):
-        nonlocal footprint
-        footprint = message
+    def capture(name):
+        def callback(message):
+            messages[name] = message
+        return callback
 
     costmap_qos = QoSProfile(depth=1)
     costmap_qos.reliability = ReliabilityPolicy.RELIABLE
     costmap_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
-    costmap_subscription = navigator.create_subscription(
-        Costmap,
-        "/global_costmap/costmap_raw",
-        capture_costmap,
-        costmap_qos,
-    )
-    footprint_subscription = navigator.create_subscription(
-        PolygonStamped,
-        "/global_costmap/published_footprint",
-        capture_footprint,
-        10,
+    subscriptions = (
+        navigator.create_subscription(
+            Costmap, "/global_costmap/costmap_raw",
+            capture("global_costmap"), costmap_qos
+        ),
+        navigator.create_subscription(
+            PolygonStamped, "/global_costmap/published_footprint",
+            capture("global_footprint"), 10
+        ),
+        navigator.create_subscription(
+            Costmap, "/local_costmap/costmap_raw",
+            capture("local_costmap"), costmap_qos
+        ),
+        navigator.create_subscription(
+            PolygonStamped, "/local_costmap/published_footprint",
+            capture("local_footprint"), 10
+        ),
     )
     try:
         deadline = time.monotonic() + timeout
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(navigator, timeout_sec=0.05)
-            if costmap is not None and footprint is not None:
+            if all(message is not None for message in messages.values()):
                 break
-        if costmap is None or footprint is None:
+        if any(message is None for message in messages.values()):
             navigator.get_logger().error(
-                "LOADED_HANDOFF_CLEARANCE_UNCERTAIN: costmap or footprint "
-                "unavailable"
+                "LOADED_HANDOFF_CLEARANCE_UNCERTAIN: global/local costmap "
+                "or footprint unavailable"
             )
             return None
-
-        points = list(footprint.polygon.points)
-        if len(points) < 3:
+        if any(
+            len(messages[name].polygon.points) < 3
+            for name in ("global_footprint", "local_footprint")
+        ):
             navigator.get_logger().error(
                 "LOADED_HANDOFF_CLEARANCE_UNCERTAIN: invalid footprint"
             )
             return None
-        center_x = sum(float(point.x) for point in points) / len(points)
-        center_y = sum(float(point.y) for point in points) / len(points)
+        return messages
+    finally:
+        for subscription in subscriptions:
+            navigator.destroy_subscription(subscription)
+
+
+def _footprint_center_and_offsets(footprint) -> tuple:
+    points = list(footprint.polygon.points)
+    center_x = sum(float(point.x) for point in points) / len(points)
+    center_y = sum(float(point.y) for point in points) / len(points)
+    return (
+        center_x,
+        center_y,
+        [(float(point.x) - center_x, float(point.y) - center_y)
+         for point in points],
+    )
+
+
+def _rotated_footprint(center_x, center_y, offsets, yaw_delta):
+    cosine = math.cos(yaw_delta)
+    sine = math.sin(yaw_delta)
+    points = []
+    for offset_x, offset_y in offsets:
+        point = Point32()
+        point.x = center_x + cosine * offset_x - sine * offset_y
+        point.y = center_y + sine * offset_x + cosine * offset_y
+        points.append(point)
+    return points
+
+
+def _initial_path_bearing(path, minimum_distance: float) -> Optional[float]:
+    if minimum_distance <= 0.0 or len(path.poses) < 2:
+        return None
+    start = path.poses[0].pose.position
+    for stamped_pose in path.poses[1:]:
+        point = stamped_pose.pose.position
+        displacement = math.hypot(
+            point.x - start.x, point.y - start.y
+        )
+        if displacement >= minimum_distance:
+            return math.atan2(point.y - start.y, point.x - start.x)
+    return None
+
+
+def _swept_clearance_analysis(
+    costmap, footprint, yaw_delta: float, sweep_step: float
+) -> Optional[dict]:
+    if sweep_step <= 0.0 or not math.isfinite(yaw_delta):
+        return None
+    center_x, center_y, offsets = _footprint_center_and_offsets(footprint)
+    sample_count = max(1, math.ceil(abs(yaw_delta) / sweep_step))
+    worst = {"footprint_lethal": 0, "footprint_outside": 0}
+    for index in range(sample_count + 1):
+        sample_yaw = yaw_delta * index / sample_count
+        points = _rotated_footprint(
+            center_x, center_y, offsets, sample_yaw
+        )
         analysis = analyze_costmap_start(
             costmap, points, (center_x, center_y, 0.0)
         )
-        return analysis
-    finally:
-        navigator.destroy_subscription(costmap_subscription)
-        navigator.destroy_subscription(footprint_subscription)
+        worst["footprint_lethal"] = max(
+            worst["footprint_lethal"], analysis["footprint_lethal"]
+        )
+        worst["footprint_outside"] = max(
+            worst["footprint_outside"], analysis["footprint_outside"]
+        )
+        if analysis["footprint_lethal"] or analysis["footprint_outside"]:
+            worst["blocked_sample"] = index
+            worst["sample_count"] = sample_count
+            return worst
+    worst["blocked_sample"] = None
+    worst["sample_count"] = sample_count
+    return worst
+
+
+def _loaded_dynamic_handoff_ready(
+    navigator: BasicNavigator,
+    args: argparse.Namespace,
+    shipping_pose: PoseStamped,
+) -> Optional[bool]:
+    messages = _read_loaded_handoff_clearance(
+        navigator, args.loaded_handoff_costmap_timeout
+    )
+    if messages is None:
+        return None
+    paths = []
+    result = _bounded_loaded_shipping_path_probe(
+        navigator,
+        shipping_pose,
+        args.loaded_prealign_planner_id,
+        args.loaded_prealign_path_probe_timeout,
+        args.loaded_prealign_path_end_tolerance,
+        paths,
+    )
+    if result is PathProbeResult.UNCERTAIN:
+        return None
+    if result is PathProbeResult.NO_PATH:
+        navigator.get_logger().info(
+            "LOADED_DYNAMIC_HANDOFF_BLOCKED: no current shipping path"
+        )
+        return False
+    path_bearing = _initial_path_bearing(
+        paths[0], args.loaded_handoff_path_lookahead
+    )
+    if path_bearing is None:
+        navigator.get_logger().error(
+            "LOADED_DYNAMIC_HANDOFF_UNCERTAIN: path bearing unavailable"
+        )
+        return None
+    current_transform = _lookup_fresh_transform(
+        navigator,
+        args.frame_id,
+        args.base_frame,
+        args.shipping_pose_lookup_timeout,
+    )
+    if current_transform is None:
+        navigator.get_logger().error(
+            "LOADED_DYNAMIC_HANDOFF_UNCERTAIN: current pose unavailable"
+        )
+        return None
+    current_yaw = _yaw_from_rotation(current_transform.transform.rotation)
+    yaw_delta = _normalize_angle(path_bearing - current_yaw)
+    analyses = {}
+    for prefix in ("global", "local"):
+        analysis = _swept_clearance_analysis(
+            messages[f"{prefix}_costmap"],
+            messages[f"{prefix}_footprint"],
+            yaw_delta,
+            args.loaded_handoff_sweep_step,
+        )
+        if analysis is None:
+            return None
+        analyses[prefix] = analysis
+    blocked = any(
+        analysis["footprint_lethal"] or analysis["footprint_outside"]
+        for analysis in analyses.values()
+    )
+    navigator.get_logger().info(
+        "LOADED_DYNAMIC_HANDOFF_RESULT: "
+        f"yaw_delta={yaw_delta:.3f} "
+        f"global_lethal={analyses['global']['footprint_lethal']} "
+        f"global_outside={analyses['global']['footprint_outside']} "
+        f"local_lethal={analyses['local']['footprint_lethal']} "
+        f"local_outside={analyses['local']['footprint_outside']}"
+    )
+    return not blocked
 
 
 def _wait_for_loaded_handoff_clearance(
@@ -1917,21 +2076,28 @@ def _wait_for_loaded_handoff_clearance(
     timeout: float,
 ) -> bool:
     """Require a received footprint with no lethal or outside costmap cells."""
-    analysis = _read_loaded_handoff_clearance(navigator, timeout)
-    if analysis is None:
+    messages = _read_loaded_handoff_clearance(navigator, timeout)
+    if messages is None:
         return False
-    lethal = analysis["footprint_lethal"]
-    outside = analysis["footprint_outside"]
-    if lethal or outside:
-        navigator.get_logger().error(
-            "LOADED_HANDOFF_CLEARANCE_BLOCKED: "
-            f"lethal={lethal} outside={outside} "
-            f"start_cost={analysis['start_cost']}"
+    results = {}
+    for prefix in ("global", "local"):
+        footprint = messages[f"{prefix}_footprint"]
+        points = list(footprint.polygon.points)
+        center_x = sum(float(point.x) for point in points) / len(points)
+        center_y = sum(float(point.y) for point in points) / len(points)
+        results[prefix] = analyze_costmap_start(
+            messages[f"{prefix}_costmap"],
+            points,
+            (center_x, center_y, 0.0),
         )
+    if any(
+        result["footprint_lethal"] or result["footprint_outside"]
+        for result in results.values()
+    ):
+        navigator.get_logger().error("LOADED_HANDOFF_CLEARANCE_BLOCKED")
         return False
     navigator.get_logger().info(
-        "LOADED_HANDOFF_CLEARANCE_READY: "
-        f"lethal=0 outside=0 start_cost={analysis['start_cost']}"
+        "LOADED_HANDOFF_CLEARANCE_READY: global/local lethal=0 outside=0"
     )
     return True
 
