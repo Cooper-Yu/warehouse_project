@@ -372,7 +372,9 @@ def test_extreme_left_experiment_alternates_to_ninety_then_final_reverse(
     risks = iter(((0, 0, 0, 10),) * 20)
 
     monkeypatch.setattr(
-        move_shelf_to_ship, "_loaded_turn_segment_safe", lambda *_args: True
+        move_shelf_to_ship,
+        "_loaded_turn_segment_within_costmap",
+        lambda *_args: True,
     )
     monkeypatch.setattr(
         move_shelf_to_ship,
@@ -424,12 +426,14 @@ def test_extreme_left_experiment_alternates_to_ninety_then_final_reverse(
     assert reverses[-1] == pytest.approx(0.20)
 
 
-def test_extreme_left_experiment_stops_when_a_turn_prefix_is_lethal(
+def test_extreme_left_experiment_stops_when_a_turn_prefix_is_outside(
     monkeypatch,
 ):
     rotations = []
     monkeypatch.setattr(
-        move_shelf_to_ship, "_loaded_turn_segment_safe", lambda *_args: False
+        move_shelf_to_ship,
+        "_loaded_turn_segment_within_costmap",
+        lambda *_args: False,
     )
     monkeypatch.setattr(
         move_shelf_to_ship,
@@ -454,6 +458,18 @@ def test_extreme_left_experiment_stops_when_a_turn_prefix_is_lethal(
         navigator, args
     )
     assert rotations == []
+
+
+def test_extreme_turn_preview_ignores_lethal_but_rejects_outside():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    helper = _function(tree, "_loaded_turn_segment_within_costmap")
+    helper_source = ast.get_source_segment(source, helper)
+
+    assert 'analysis["footprint_outside"]' in helper_source
+    assert 'lethal[prefix] = analysis["footprint_lethal"]' in helper_source
+    assert 'if analysis["footprint_lethal"]' not in helper_source
+    assert "lethal intentionally ignored" in helper_source
 
 
 def test_loaded_reverse_arc_requires_both_odom_targets_and_stops():

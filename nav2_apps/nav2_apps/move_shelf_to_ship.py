@@ -2028,12 +2028,14 @@ def _loaded_egress_extreme_left_90_experiment(
     while total_yaw + args.loaded_egress_yaw_tolerance < target_yaw:
         round_index += 1
         segment = min(turn_step, target_yaw - total_yaw)
-        turn_safe = _loaded_turn_segment_safe(navigator, args, segment)
-        if turn_safe is None:
+        turn_within_costmap = _loaded_turn_segment_within_costmap(
+            navigator, args, segment
+        )
+        if turn_within_costmap is None:
             return False
-        if not turn_safe:
+        if not turn_within_costmap:
             navigator.get_logger().error(
-                "LOADED_EGRESS_EXTREME_TURN_BLOCKED: "
+                "LOADED_EGRESS_EXTREME_TURN_OUTSIDE: "
                 f"round={round_index} total_yaw={total_yaw:.3f} "
                 f"next={segment:.3f}"
             )
@@ -2312,6 +2314,38 @@ def _loaded_turn_segment_safe(
             return None
         if analysis["footprint_lethal"] or analysis["footprint_outside"]:
             return False
+    return True
+
+
+def _loaded_turn_segment_within_costmap(
+    navigator: BasicNavigator,
+    args: argparse.Namespace,
+    yaw_delta: float,
+) -> Optional[bool]:
+    """For the extreme simulation experiment, reject outside only."""
+    messages = _read_loaded_handoff_clearance(
+        navigator, args.loaded_handoff_costmap_timeout
+    )
+    if messages is None:
+        return None
+    lethal = {}
+    for prefix in ("global", "local"):
+        analysis = _swept_clearance_analysis(
+            messages[f"{prefix}_costmap"],
+            messages[f"{prefix}_footprint"],
+            yaw_delta,
+            args.loaded_handoff_sweep_step,
+        )
+        if analysis is None:
+            return None
+        if analysis["footprint_outside"]:
+            return False
+        lethal[prefix] = analysis["footprint_lethal"]
+    navigator.get_logger().warning(
+        "LOADED_EGRESS_EXTREME_TURN_PREVIEW: lethal intentionally ignored "
+        f"during bounded rotation global={lethal['global']} "
+        f"local={lethal['local']}"
+    )
     return True
 
 
