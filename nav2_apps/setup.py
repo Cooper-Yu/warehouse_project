@@ -32,6 +32,8 @@ setup(
             "nav2_apps.explicit_start_pair_probe:main",
             "motion_evidence_monitor = "
             "nav2_apps.motion_evidence_monitor:main",
+            "loaded_scan_profile = "
+            "nav2_apps.loaded_scan_profile:main",
         ],
     },
 )
