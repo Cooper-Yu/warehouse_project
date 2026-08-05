@@ -40,8 +40,13 @@ mkdir -p "${output_dir}"
 } > "${output_dir}/metadata.yaml"
 
 monitor_executable="$(ros2 pkg prefix nav2_apps)/lib/nav2_apps/motion_evidence_monitor"
+monitor_use_sim_time=false
+if timeout 3 ros2 topic list 2>/dev/null | grep -qx /clock; then
+  monitor_use_sim_time=true
+fi
 "${monitor_executable}" --ros-args \
   -p output_dir:="${output_dir}" \
+  -p use_sim_time:="${monitor_use_sim_time}" \
   > "${output_dir}/monitor.log" 2>&1 &
 monitor_pid=$!
 monitor_stopped=0

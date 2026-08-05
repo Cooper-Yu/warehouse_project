@@ -3,6 +3,7 @@
 import csv
 from datetime import datetime, timezone
 import gzip
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -196,6 +197,11 @@ class MotionEvidenceMonitor(Node):
         self.local_path_poses = 0
         self.global_costmap: Optional[Costmap] = None
         self.global_footprint: Optional[PolygonStamped] = None
+        self.global_costmap_receipt_ros_time: Optional[float] = None
+        self.global_footprint_receipt_ros_time: Optional[float] = None
+        self.global_costmap_sequence = 0
+        self.global_footprint_sequence = 0
+        self.latest_planner_diagnostic: Optional[tuple] = None
         self.costmap_snapshot_count = 0
         self._probe_sequence = 0
 
@@ -258,12 +264,23 @@ class MotionEvidenceMonitor(Node):
                 "sequence",
                 "utc_time",
                 "capture_ros_time_sec",
+                "capture_clock_domain",
                 "probe_result",
                 "probe_log_stamp_sec",
+                "probe_log_clock_domain",
+                "probe_receipt_ros_time_sec",
+                "planner_log_stamp_sec",
+                "planner_receipt_ros_time_sec",
+                "planner_receipt_delta_sec",
+                "planner_log_level",
+                "planner_log_message",
                 "tf_x",
                 "tf_y",
                 "tf_yaw",
                 "costmap_stamp_sec",
+                "costmap_receipt_ros_time_sec",
+                "costmap_sequence",
+                "costmap_data_sha256",
                 "costmap_age_sec",
                 "costmap_frame",
                 "resolution",
@@ -272,6 +289,8 @@ class MotionEvidenceMonitor(Node):
                 "origin_x",
                 "origin_y",
                 "footprint_stamp_sec",
+                "footprint_receipt_ros_time_sec",
+                "footprint_sequence",
                 "footprint_age_sec",
                 "footprint_frame",
                 "footprint_points",
@@ -375,9 +394,17 @@ class MotionEvidenceMonitor(Node):
 
     def _global_costmap_callback(self, message: Costmap) -> None:
         self.global_costmap = message
+        self.global_costmap_receipt_ros_time = (
+            self.get_clock().now().nanoseconds / 1e9
+        )
+        self.global_costmap_sequence += 1
 
     def _global_footprint_callback(self, message: PolygonStamped) -> None:
         self.global_footprint = message
+        self.global_footprint_receipt_ros_time = (
+            self.get_clock().now().nanoseconds / 1e9
+        )
+        self.global_footprint_sequence += 1
 
     @staticmethod
     def _stamp_seconds(stamp) -> float:
@@ -395,11 +422,37 @@ class MotionEvidenceMonitor(Node):
                 return result
         return None
 
-    def _capture_probe_costmap(self, result: str, log_stamp: float) -> None:
+    def _capture_probe_costmap(
+        self,
+        result: str,
+        log_stamp: float,
+        probe_receipt_ros_time: float,
+    ) -> None:
         self._probe_sequence += 1
         sequence = self._probe_sequence
         capture_time = self.get_clock().now()
         capture_seconds = capture_time.nanoseconds / 1e9
+        planner_stamp = None
+        planner_receipt_ros_time = None
+        planner_level = None
+        planner_message = ""
+        planner_delta = None
+        if self.latest_planner_diagnostic is not None:
+            (
+                candidate_stamp,
+                candidate_receipt_ros_time,
+                candidate_level,
+                candidate_message,
+            ) = self.latest_planner_diagnostic
+            candidate_delta = (
+                probe_receipt_ros_time - candidate_receipt_ros_time
+            )
+            if 0.0 <= candidate_delta <= 2.0:
+                planner_stamp = candidate_stamp
+                planner_receipt_ros_time = candidate_receipt_ros_time
+                planner_level = candidate_level
+                planner_message = candidate_message
+                planner_delta = candidate_delta
         status = []
         pose = None
         try:
@@ -436,10 +489,18 @@ class MotionEvidenceMonitor(Node):
                 "sequence": sequence,
                 "probe_result": result,
                 "probe_log_stamp_sec": log_stamp,
+                "probe_receipt_ros_time_sec": probe_receipt_ros_time,
                 "capture_ros_time_sec": capture_seconds,
                 "tf_pose": {"x": pose[0], "y": pose[1], "yaw": pose[2]},
                 "costmap": {
                     "stamp_sec": self._stamp_seconds(costmap.header.stamp),
+                    "receipt_ros_time_sec": (
+                        self.global_costmap_receipt_ros_time
+                    ),
+                    "sequence": self.global_costmap_sequence,
+                    "data_sha256": hashlib.sha256(
+                        bytes(costmap.data)
+                    ).hexdigest(),
                     "frame_id": costmap.header.frame_id,
                     "resolution": float(metadata.resolution),
                     "size_x": int(metadata.size_x),
@@ -454,6 +515,17 @@ class MotionEvidenceMonitor(Node):
                     {"x": point.x, "y": point.y, "z": point.z}
                     for point in footprint
                 ],
+                "footprint_receipt_ros_time_sec": (
+                    self.global_footprint_receipt_ros_time
+                ),
+                "footprint_sequence": self.global_footprint_sequence,
+                "planner_diagnostic": {
+                    "stamp_sec": planner_stamp,
+                    "receipt_ros_time_sec": planner_receipt_ros_time,
+                    "delta_sec": planner_delta,
+                    "level": planner_level,
+                    "message": planner_message,
+                },
                 "analysis": analysis,
             }
             with gzip.open(
@@ -477,12 +549,35 @@ class MotionEvidenceMonitor(Node):
             sequence,
             datetime.now(timezone.utc).isoformat(),
             f"{capture_seconds:.9f}",
+            "ros_clock",
             result,
             f"{log_stamp:.9f}",
+            "system_time_rosout_stamp",
+            f"{probe_receipt_ros_time:.9f}",
+            "" if planner_stamp is None else f"{planner_stamp:.9f}",
+            (
+                ""
+                if planner_receipt_ros_time is None
+                else f"{planner_receipt_ros_time:.9f}"
+            ),
+            "" if planner_delta is None else f"{planner_delta:.9f}",
+            "" if planner_level is None else planner_level,
+            planner_message,
             "" if pose is None else pose[0],
             "" if pose is None else pose[1],
             "" if pose is None else pose[2],
             "" if costmap_stamp is None else f"{costmap_stamp:.9f}",
+            (
+                ""
+                if self.global_costmap_receipt_ros_time is None
+                else f"{self.global_costmap_receipt_ros_time:.9f}"
+            ),
+            self.global_costmap_sequence,
+            (
+                ""
+                if costmap is None
+                else hashlib.sha256(bytes(costmap.data)).hexdigest()
+            ),
             "" if costmap_stamp is None else capture_seconds - costmap_stamp,
             "" if costmap is None else costmap.header.frame_id,
             "" if metadata is None else metadata.resolution,
@@ -491,6 +586,12 @@ class MotionEvidenceMonitor(Node):
             "" if metadata is None else metadata.origin.position.x,
             "" if metadata is None else metadata.origin.position.y,
             "" if footprint_stamp is None else f"{footprint_stamp:.9f}",
+            (
+                ""
+                if self.global_footprint_receipt_ros_time is None
+                else f"{self.global_footprint_receipt_ros_time:.9f}"
+            ),
+            self.global_footprint_sequence,
             (
                 ""
                 if footprint_stamp is None
@@ -528,8 +629,20 @@ class MotionEvidenceMonitor(Node):
         self.phases.add(self.phase)
         probe_result = self._probe_result(message.msg)
         stamp = float(message.stamp.sec) + float(message.stamp.nanosec) / 1e9
+        receipt_ros_time = self.get_clock().now().nanoseconds / 1e9
+        if "planner_server" in message.name and int(message.level) >= 30:
+            self.latest_planner_diagnostic = (
+                stamp,
+                receipt_ros_time,
+                int(message.level),
+                message.msg,
+            )
         if probe_result is not None:
-            self._capture_probe_costmap(probe_result, stamp)
+            self._capture_probe_costmap(
+                probe_result,
+                stamp,
+                receipt_ros_time,
+            )
         selected_names = (
             "basic_navigator",
             "shelf_detection_server",

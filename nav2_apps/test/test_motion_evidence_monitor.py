@@ -5,6 +5,7 @@ import sys
 import pytest
 from geometry_msgs.msg import Point32, Quaternion
 from nav2_msgs.msg import Costmap
+from rcl_interfaces.msg import Log
 
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -165,6 +166,9 @@ def test_collector_script_is_bounded_and_cleans_up_monitor():
     assert "monitor_executable" in script
     assert "runtime_logs/motion_" in script
     assert "mission_status=${PIPESTATUS[0]}" in script
+    assert "ros2 topic list" in script
+    assert 'grep -qx /clock' in script
+    assert '-p use_sim_time:="${monitor_use_sim_time}"' in script
 
 
 def test_monitor_source_keeps_costmap_capture_read_only():
@@ -181,3 +185,60 @@ def test_monitor_source_keeps_costmap_capture_read_only():
     assert "create_publisher" not in source
     assert "create_client" not in source
     assert "ActionClient" not in source
+
+
+def test_costmap_callbacks_record_receipt_sequence_in_node_clock():
+    monitor = object.__new__(MotionEvidenceMonitor)
+    monitor.global_costmap_sequence = 0
+    monitor.global_footprint_sequence = 0
+
+    class ClockNow:
+        nanoseconds = 12_500_000_000
+
+    class Clock:
+        @staticmethod
+        def now():
+            return ClockNow()
+
+    monitor.get_clock = lambda: Clock()
+    costmap = Costmap()
+
+    MotionEvidenceMonitor._global_costmap_callback(monitor, costmap)
+
+    assert monitor.global_costmap is costmap
+    assert monitor.global_costmap_sequence == 1
+    assert monitor.global_costmap_receipt_ros_time == pytest.approx(12.5)
+
+
+def test_planner_warning_is_retained_for_probe_correlation():
+    monitor = object.__new__(MotionEvidenceMonitor)
+    monitor.phase = "LOCALIZATION_READY"
+    monitor.phases = {monitor.phase}
+    monitor.latest_planner_diagnostic = None
+    monitor.event_count = 0
+    monitor._event_writer = type(
+        "Writer", (), {"writerow": lambda self, row: None}
+    )()
+    monitor._event_file = type("File", (), {"flush": lambda self: None})()
+    monitor._capture_probe_costmap = lambda result, stamp, receipt: None
+    monitor.get_clock = lambda: type(
+        "Clock", (), {
+            "now": lambda self: type(
+                "Now", (), {"nanoseconds": 41_900_000_000}
+            )()
+        }
+    )()
+    message = Log()
+    message.name = "planner_server"
+    message.level = 30
+    message.stamp.sec = 42
+    message.msg = "GridBased: failed to create plan with tolerance 0.50."
+
+    MotionEvidenceMonitor._log_callback(monitor, message)
+
+    assert monitor.latest_planner_diagnostic == (
+        42.0,
+        41.9,
+        30,
+        "GridBased: failed to create plan with tolerance 0.50.",
+    )
