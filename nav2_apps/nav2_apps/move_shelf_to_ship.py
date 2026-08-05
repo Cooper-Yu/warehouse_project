@@ -195,6 +195,12 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-egress-yaw-tolerance", type=float, default=0.01
     )
     parser.add_argument(
+        "--loaded-egress-handoff-right-yaw", type=float, default=math.pi / 2.0
+    )
+    parser.add_argument(
+        "--loaded-egress-handoff-turn-timeout", type=float, default=45.0
+    )
+    parser.add_argument(
         "--loaded-prealign-max-segment-yaw", type=float, default=0.15
     )
     parser.add_argument(
@@ -1608,7 +1614,8 @@ def _loaded_egress_before_shipping(
     """Open clearance with two turn/reverse pairs before Nav2 handoff."""
     navigator.get_logger().info(
         "loaded egress: left 0.12 -> reverse 0.50 -> left 0.16 -> "
-        "reverse 0.60 before direct Nav2 handoff"
+        "reverse 0.60 -> right (pi/2 + prior left yaw) before direct "
+        "Nav2 handoff"
     )
     if not _bounded_rotate_by_odom(
         navigator,
@@ -1666,6 +1673,30 @@ def _loaded_egress_before_shipping(
         args.exit_heading_tolerance,
         args.exit_lateral_tolerance,
         "loaded egress final reverse",
+    ):
+        return False
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
+    handoff_right_yaw = -(
+        args.loaded_egress_handoff_right_yaw
+        + args.loaded_egress_first_turn_yaw
+        + args.loaded_egress_second_turn_yaw
+    )
+    navigator.get_logger().info(
+        "loaded egress handoff right turn: "
+        f"target_yaw={handoff_right_yaw:.3f} "
+        "(base right pi/2 plus prior left yaw)"
+    )
+    if not _bounded_rotate_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        handoff_right_yaw,
+        args.loaded_egress_angular_speed,
+        args.loaded_egress_handoff_turn_timeout,
+        args.odom_lookup_timeout,
+        args.loaded_egress_yaw_tolerance,
     ):
         return False
     if not _settle_without_motion(navigator, args.exit_settle):

@@ -1,6 +1,8 @@
 import ast
+import math
 from pathlib import Path
 
+import pytest
 from geometry_msgs.msg import PoseStamped
 from nav2_apps import move_shelf_to_ship
 
@@ -43,6 +45,8 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_first_turn_yaw == 0.12
     assert args.loaded_egress_final_reverse == 0.60
     assert args.loaded_egress_second_turn_yaw == 0.16
+    assert args.loaded_egress_handoff_right_yaw == pytest.approx(math.pi / 2.0)
+    assert args.loaded_egress_handoff_turn_timeout == 45.0
     assert args.loaded_egress_linear_speed == 0.05
     assert args.loaded_egress_angular_speed == 0.05
     assert args.loaded_prealign_max_segment_yaw == 0.15
@@ -159,17 +163,21 @@ def test_loaded_egress_is_bounded_and_ordered_before_shipping():
         "_bounded_reverse_by_odom",
         "_bounded_rotate_by_odom",
         "_bounded_reverse_by_odom",
+        "_bounded_rotate_by_odom",
     ]
-    assert egress_source.count("_bounded_rotate_by_odom") == 2
+    assert egress_source.count("_bounded_rotate_by_odom") == 3
     assert egress_source.count("_bounded_reverse_by_odom") == 2
-    assert egress_source.count("_settle_without_motion") == 4
+    assert egress_source.count("_settle_without_motion") == 5
     assert '"loaded egress initial reverse"' in egress_source
     assert '"loaded egress final reverse"' in egress_source
     assert '"loaded egress extra reverse"' not in egress_source
     assert "left 0.12 -> reverse 0.50 -> left 0.16" in egress_source
-    assert "reverse 0.60 before direct Nav2 handoff" in egress_source
+    assert "right (pi/2 + prior left yaw)" in egress_source
     assert "args.loaded_egress_first_turn_yaw" in egress_source
     assert "args.loaded_egress_second_turn_yaw" in egress_source
+    assert "args.loaded_egress_handoff_right_yaw" in egress_source
+    assert "args.loaded_egress_handoff_turn_timeout" in egress_source
+    assert "handoff_right_yaw = -(" in egress_source
     assert "LOADED_EGRESS_COMPLETE" in egress_source
 
 
