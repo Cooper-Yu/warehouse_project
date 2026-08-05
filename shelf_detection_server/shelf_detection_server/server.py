@@ -211,6 +211,10 @@ class ShelfDetectionServer(Node):
         # The executor remains opt-in until a separate simulation runtime
         # gate accepts the connected motion path.
         self.declare_parameter("lateral_execution_enabled", False)
+        # Positive target means the shelf midpoint remains to the robot's
+        # left, placing the robot slightly right of geometric center.
+        self.declare_parameter("lateral_target_offset", 0.0)
+        self.declare_parameter("lateral_target_tolerance", 0.02)
         self.declare_parameter("lateral_correction_ratio", 0.50)
         self.declare_parameter("lateral_temporary_yaw", 0.5235987756)
         self.declare_parameter("lateral_max_abs_yaw", 0.55)
@@ -1113,8 +1117,11 @@ class ShelfDetectionServer(Node):
         lateral_tolerance = max(
             0.0,
             float(
-                self.get_parameter("center_lateral_tolerance").value
+                self.get_parameter("lateral_target_tolerance").value
             ),
+        )
+        lateral_target = float(
+            self.get_parameter("lateral_target_offset").value
         )
         lateral_execution_enabled = bool(
             self.get_parameter("lateral_execution_enabled").value
@@ -1214,8 +1221,9 @@ class ShelfDetectionServer(Node):
             heading_ok = shelf_heading_aligned(
                 shelf_heading, heading_tolerance
             )
+            target_relative_lateral_error = error_y - lateral_target
             lateral_decision = classify_lateral_center(
-                error_y,
+                target_relative_lateral_error,
                 lateral_tolerance,
                 fresh=observation_fresh,
                 safe_zone=safe_zone,
@@ -1225,6 +1233,8 @@ class ShelfDetectionServer(Node):
             self.get_logger().info(
                 "lateral-centering shadow observation: "
                 f"lateral_error={error_y:.3f} "
+                f"target={lateral_target:.3f} "
+                f"target_error={target_relative_lateral_error:.3f} "
                 f"tolerance={lateral_tolerance:.3f} "
                 f"fresh={observation_fresh} "
                 f"safe_zone={safe_zone} "
@@ -1264,7 +1274,7 @@ class ShelfDetectionServer(Node):
                     observation_fresh=observation_fresh,
                     clearance_accepted=clearance_accepted,
                     robot_stopped=stopped_yaw is not None,
-                    lateral_error=error_y,
+                    lateral_error=target_relative_lateral_error,
                     correction_ratio=float(
                         self.get_parameter(
                             "lateral_correction_ratio"

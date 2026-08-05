@@ -70,6 +70,8 @@ class _AlignmentHarness:
             "alignment_position_tolerance": 0.08,
             "center_lateral_tolerance": 0.08,
             "lateral_execution_enabled": False,
+            "lateral_target_offset": 0.0,
+            "lateral_target_tolerance": 0.02,
             "lateral_correction_ratio": 0.50,
             "lateral_temporary_yaw": math.pi / 6.0,
             "lateral_max_abs_yaw": 0.55,
@@ -222,6 +224,8 @@ def test_c9_policy_parameters_are_declared():
     assert declared["final_drive_distance"] == pytest.approx(0.3703)
     assert declared["entry_odom_yaw_tolerance"] == 0.03
     assert declared["lateral_execution_enabled"] is False
+    assert declared["lateral_target_offset"] == 0.0
+    assert declared["lateral_target_tolerance"] == 0.02
     assert declared["lateral_correction_ratio"] == 0.50
     assert declared["lateral_temporary_yaw"] == pytest.approx(
         math.pi / 6.0
@@ -638,6 +642,51 @@ def test_lateral_execution_gate_rejection_creates_no_motion():
     assert harness.rotations == []
     assert harness.drives == []
     assert harness.stop_count == 1
+
+
+def test_positive_lateral_target_places_robot_right_of_shelf_center():
+    aligned_target = ("base", 1.0, 0.03, 0.0)
+    harness = _AlignmentHarness(
+        [aligned_target], stable_yaws=[0.0, 0.0, 0.0]
+    )
+    harness.parameters["lateral_execution_enabled"] = True
+    harness.parameters["lateral_target_offset"] = 0.03
+    harness.parameters["lateral_target_tolerance"] = 0.01
+    lateral_calls = []
+    harness._execute_lateral_action = lambda *args: lateral_calls.append(args)
+
+    result = harness._align_at_safe_standoff(
+        aligned_target,
+        time.monotonic() + 10.0,
+    )
+
+    assert result == (aligned_target, 0.0)
+    assert lateral_calls == []
+
+
+def test_zero_observation_corrects_toward_positive_lateral_target():
+    aligned_target = ("base", 1.0, 0.03, 0.0)
+    harness = _AlignmentHarness(
+        [aligned_target], stable_yaws=[0.0, 0.0, 0.0]
+    )
+    harness.parameters["lateral_execution_enabled"] = True
+    harness.parameters["lateral_target_offset"] = 0.03
+    harness.parameters["lateral_target_tolerance"] = 0.01
+    lateral_calls = []
+
+    def execute(*args):
+        lateral_calls.append(args)
+        return aligned_target
+
+    harness._execute_lateral_action = execute
+    result = harness._align_at_safe_standoff(
+        ("base", 1.0, 0.0, 0.0),
+        time.monotonic() + 10.0,
+    )
+
+    assert result == (aligned_target, 0.0)
+    assert len(lateral_calls) == 1
+    assert lateral_calls[0][1] < 0.0
 
 
 def test_lateral_clearance_rejection_creates_no_motion():

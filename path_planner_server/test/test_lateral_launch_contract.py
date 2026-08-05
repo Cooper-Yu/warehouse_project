@@ -57,6 +57,8 @@ def test_lateral_execution_argument_only_reaches_simulation_shelf_node():
     assert condition_source == "IfCondition(use_sim_time)"
     assert '"lateral_execution_enabled": ParameterValue(' in node_source
     assert "lateral_execution_enabled," in node_source
+    assert '"lateral_target_offset": ParameterValue(' in node_source
+    assert '"lateral_target_tolerance": ParameterValue(' in node_source
     assert '"alignment_fine_min_rotate_speed": 0.015' in node_source
     assert '"alignment_fine_speed_gain": 0.50' in node_source
     assert '"alignment_heading_hold_tolerance": 0.04' in node_source
@@ -81,3 +83,33 @@ def test_real_navigation_branch_does_not_receive_lateral_argument():
     assert "lateral_execution_enabled" not in ast.get_source_segment(
         source, real_call
     )
+    assert "lateral_target_offset" not in ast.get_source_segment(
+        source, real_call
+    )
+    assert "lateral_target_tolerance" not in ast.get_source_segment(
+        source, real_call
+    )
+
+
+def test_lateral_target_launch_arguments_keep_neutral_defaults():
+    _source, tree = _source_and_tree()
+    defaults = {}
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "DeclareLaunchArgument"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            continue
+        name = node.args[0].value
+        if name not in {"lateral_target_offset", "lateral_target_tolerance"}:
+            continue
+        keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+        defaults[name] = keywords["default_value"].value
+
+    assert defaults == {
+        "lateral_target_offset": "0.0",
+        "lateral_target_tolerance": "0.02",
+    }

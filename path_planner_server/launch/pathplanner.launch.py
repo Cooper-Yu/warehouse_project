@@ -81,6 +81,10 @@ def generate_launch_description():
     lateral_execution_enabled = LaunchConfiguration(
         "lateral_execution_enabled"
     )
+    lateral_target_offset = LaunchConfiguration("lateral_target_offset")
+    lateral_target_tolerance = LaunchConfiguration(
+        "lateral_target_tolerance"
+    )
     keepout_mask_file = LaunchConfiguration("keepout_mask_file")
     package_share = FindPackageShare("path_planner_server")
     map_package_share = FindPackageShare("map_server")
@@ -138,6 +142,21 @@ def generate_launch_description():
                 description=(
                     "Enable the simulation-only bounded lateral-centering "
                     "executor. Defaults to disabled."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "lateral_target_offset",
+                default_value="0.0",
+                description=(
+                    "Simulation-only shelf midpoint target in base-frame y. "
+                    "Positive values place the robot right of shelf center."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "lateral_target_tolerance",
+                default_value="0.02",
+                description=(
+                    "Simulation-only tolerance around lateral_target_offset."
                 ),
             ),
             DeclareLaunchArgument(
@@ -224,6 +243,14 @@ def generate_launch_description():
                         "lateral_execution_enabled": ParameterValue(
                             lateral_execution_enabled,
                             value_type=bool,
+                        ),
+                        "lateral_target_offset": ParameterValue(
+                            lateral_target_offset,
+                            value_type=float,
+                        ),
+                        "lateral_target_tolerance": ParameterValue(
+                            lateral_target_tolerance,
+                            value_type=float,
                         ),
                         # Simulation-only fine alignment: slow down
                         # proportionally near zero and retain a strict first
