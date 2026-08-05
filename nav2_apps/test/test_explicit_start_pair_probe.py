@@ -2,7 +2,8 @@ import ast
 from pathlib import Path
 
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import OccupancyGrid, Path as NavPath
+from nav2_msgs.msg import Costmap
+from nav_msgs.msg import Path as NavPath
 
 from nav2_apps import explicit_start_pair_probe as probe
 
@@ -45,19 +46,27 @@ def test_pose_delta_is_wrap_safe():
 
 
 def test_costmap_digest_changes_with_grid_data():
-    first = OccupancyGrid()
+    first = Costmap()
     first.header.frame_id = "map"
-    first.info.resolution = 0.05
-    first.info.width = 2
-    first.info.height = 1
-    first.data = [0, -1]
-    second = OccupancyGrid()
+    first.metadata.resolution = 0.05
+    first.metadata.size_x = 2
+    first.metadata.size_y = 1
+    first.data = [0, 255]
+    second = Costmap()
     second.header.frame_id = "map"
-    second.info.resolution = 0.05
-    second.info.width = 2
-    second.info.height = 1
+    second.metadata.resolution = 0.05
+    second.metadata.size_x = 2
+    second.metadata.size_y = 1
     second.data = [0, 100]
     assert probe._costmap_digest(first) != probe._costmap_digest(second)
+
+
+def test_costmap_subscription_uses_nav2_type_and_transient_local_qos():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    assert "from nav2_msgs.msg import Costmap" in source
+    assert "DurabilityPolicy.TRANSIENT_LOCAL" in source
+    assert "ReliabilityPolicy.RELIABLE" in source
+    assert "OccupancyGrid" not in source
 
 
 def test_usable_path_requires_map_frame_and_two_finite_poses():

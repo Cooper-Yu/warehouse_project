@@ -12,10 +12,11 @@ from typing import Optional
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import ComputePathToPose
-from nav_msgs.msg import OccupancyGrid
+from nav2_msgs.msg import Costmap
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.utilities import remove_ros_args
 import tf2_ros
 
@@ -48,13 +49,13 @@ def _pose_delta(first: PoseStamped, second: PoseStamped) -> tuple:
     return position, abs(_normalize_angle(second_yaw - first_yaw))
 
 
-def _costmap_digest(message: OccupancyGrid) -> str:
+def _costmap_digest(message: Costmap) -> str:
     digest = hashlib.sha256()
     digest.update(message.header.frame_id.encode("utf-8"))
-    digest.update(str(message.info.resolution).encode("ascii"))
-    digest.update(str(message.info.width).encode("ascii"))
-    digest.update(str(message.info.height).encode("ascii"))
-    origin = message.info.origin
+    digest.update(str(message.metadata.resolution).encode("ascii"))
+    digest.update(str(message.metadata.size_x).encode("ascii"))
+    digest.update(str(message.metadata.size_y).encode("ascii"))
+    origin = message.metadata.origin
     digest.update(repr((
         origin.position.x,
         origin.position.y,
@@ -88,7 +89,7 @@ class ExplicitStartPairProbe(Node):
         super().__init__("explicit_start_pair_probe")
         self.args = args
         self.motion_seen = False
-        self.costmap: Optional[OccupancyGrid] = None
+        self.costmap: Optional[Costmap] = None
         self.costmap_sequence = 0
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(
@@ -100,8 +101,11 @@ class ExplicitStartPairProbe(Node):
         self.create_subscription(
             Twist, args.cmd_vel_topic, self._on_twist, 20
         )
+        costmap_qos = QoSProfile(depth=1)
+        costmap_qos.reliability = ReliabilityPolicy.RELIABLE
+        costmap_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.create_subscription(
-            OccupancyGrid, args.costmap_topic, self._on_costmap, 10
+            Costmap, args.costmap_topic, self._on_costmap, costmap_qos
         )
 
     def _on_twist(self, message: Twist) -> None:
@@ -115,7 +119,7 @@ class ExplicitStartPairProbe(Node):
         ):
             self.motion_seen = True
 
-    def _on_costmap(self, message: OccupancyGrid) -> None:
+    def _on_costmap(self, message: Costmap) -> None:
         self.costmap = message
         self.costmap_sequence += 1
 
