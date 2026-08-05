@@ -7,4 +7,9 @@ install(DIRECTORY launch config rviz
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  tools/clear_map_polygon.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
