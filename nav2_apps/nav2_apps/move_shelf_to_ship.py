@@ -219,6 +219,33 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-egress-no-improvement-limit", type=int, default=2
     )
     parser.add_argument(
+        "--loaded-egress-extreme-left-90-experiment",
+        action="store_true",
+        help=(
+            "Simulation-only diagnostic: alternate bounded left-turn and "
+            "reverse steps to 90 degrees, reverse once more, then request "
+            "a direct zero-lethal Nav2 handoff."
+        ),
+    )
+    parser.add_argument(
+        "--loaded-egress-extreme-target-yaw",
+        type=float,
+        default=math.pi / 2.0,
+    )
+    parser.add_argument(
+        "--loaded-egress-extreme-turn-step", type=float, default=0.10
+    )
+    parser.add_argument(
+        "--loaded-egress-extreme-reverse-per-turn",
+        type=float,
+        default=0.05,
+    )
+    parser.add_argument(
+        "--loaded-egress-extreme-final-reverse",
+        type=float,
+        default=0.20,
+    )
+    parser.add_argument(
         "--loaded-egress-arc-distance", type=float, default=0.35
     )
     parser.add_argument(
@@ -1969,6 +1996,125 @@ def _loaded_egress_before_shipping(
     return False
 
 
+def _loaded_egress_extreme_left_90_experiment(
+    navigator: BasicNavigator, args: argparse.Namespace
+) -> bool:
+    """Run the explicit simulation-only turn/reverse geometry experiment."""
+    target_yaw = args.loaded_egress_extreme_target_yaw
+    turn_step = args.loaded_egress_extreme_turn_step
+    reverse_step = args.loaded_egress_extreme_reverse_per_turn
+    final_reverse = args.loaded_egress_extreme_final_reverse
+    if (
+        target_yaw <= 0.0
+        or target_yaw > math.pi / 2.0 + 1e-9
+        or turn_step <= 0.0
+        or turn_step > target_yaw
+        or reverse_step <= 0.0
+        or final_reverse <= 0.0
+    ):
+        navigator.get_logger().error(
+            "LOADED_EGRESS_EXTREME_UNCERTAIN: invalid experiment limits"
+        )
+        return False
+
+    navigator.get_logger().warning(
+        "LOADED_EGRESS_EXTREME_BEGIN: simulation-only alternating left "
+        f"turn/reverse to yaw={target_yaw:.3f}, then final reverse="
+        f"{final_reverse:.3f}"
+    )
+    total_yaw = 0.0
+    total_reverse = 0.0
+    round_index = 0
+    while total_yaw + args.loaded_egress_yaw_tolerance < target_yaw:
+        round_index += 1
+        segment = min(turn_step, target_yaw - total_yaw)
+        turn_safe = _loaded_turn_segment_safe(navigator, args, segment)
+        if turn_safe is None:
+            return False
+        if not turn_safe:
+            navigator.get_logger().error(
+                "LOADED_EGRESS_EXTREME_TURN_BLOCKED: "
+                f"round={round_index} total_yaw={total_yaw:.3f} "
+                f"next={segment:.3f}"
+            )
+            return False
+        if not _bounded_rotate_by_odom(
+            navigator,
+            args.cmd_vel_topic,
+            args.odom_frame,
+            args.base_frame,
+            segment,
+            args.loaded_egress_angular_speed,
+            args.loaded_egress_motion_timeout,
+            args.odom_lookup_timeout,
+            args.loaded_egress_yaw_tolerance,
+        ):
+            return False
+        total_yaw += segment
+        if not _settle_without_motion(navigator, args.exit_settle):
+            return False
+
+        if not _bounded_reverse_by_odom(
+            navigator,
+            args.cmd_vel_topic,
+            args.odom_frame,
+            args.base_frame,
+            reverse_step,
+            args.loaded_egress_linear_speed,
+            args.loaded_egress_motion_timeout,
+            args.odom_lookup_timeout,
+            args.exit_heading_tolerance,
+            args.exit_lateral_tolerance,
+            f"loaded extreme egress round {round_index}",
+        ):
+            return False
+        total_reverse += reverse_step
+        if not _settle_without_motion(navigator, args.exit_settle):
+            return False
+        risk = _read_loaded_current_risk(
+            navigator, args.loaded_handoff_costmap_timeout
+        )
+        if risk is None or risk[0] != 0 or risk[1] != 0:
+            navigator.get_logger().error(
+                "LOADED_EGRESS_EXTREME_PAIR_BLOCKED: "
+                f"round={round_index} risk={risk}"
+            )
+            return False
+        navigator.get_logger().info(
+            "LOADED_EGRESS_EXTREME_PAIR_RESULT: "
+            f"round={round_index} total_yaw={total_yaw:.3f} "
+            f"total_reverse={total_reverse:.3f} risk={risk}"
+        )
+
+    if not _bounded_reverse_by_odom(
+        navigator,
+        args.cmd_vel_topic,
+        args.odom_frame,
+        args.base_frame,
+        final_reverse,
+        args.loaded_egress_linear_speed,
+        args.loaded_egress_motion_timeout,
+        args.odom_lookup_timeout,
+        args.exit_heading_tolerance,
+        args.exit_lateral_tolerance,
+        "loaded extreme egress final reverse",
+    ):
+        return False
+    total_reverse += final_reverse
+    if not _settle_without_motion(navigator, args.exit_settle):
+        return False
+    if not _wait_for_loaded_handoff_clearance(
+        navigator, args.loaded_handoff_costmap_timeout
+    ):
+        return False
+    navigator.get_logger().warning(
+        "LOADED_EGRESS_EXTREME_COMPLETE: "
+        f"yaw={total_yaw:.3f} reverse={total_reverse:.3f}; "
+        "zero-lethal direct Nav2 handoff may proceed"
+    )
+    return True
+
+
 def _read_loaded_handoff_clearance(
     navigator: BasicNavigator,
     timeout: float,
@@ -3062,7 +3208,13 @@ def _run_integrated_mission(
         args.footprint_edge_tolerance,
     ):
         return ExitCode.UNKNOWN
-    if not _loaded_egress_before_shipping(navigator, args):
+    if args.loaded_egress_extreme_left_90_experiment:
+        egress_ready = _loaded_egress_extreme_left_90_experiment(
+            navigator, args
+        )
+    else:
+        egress_ready = _loaded_egress_before_shipping(navigator, args)
+    if not egress_ready:
         navigator.get_logger().error(
             "integrated mission stopped before shipping: reverse S failed"
         )
@@ -3089,10 +3241,11 @@ def _run_integrated_mission(
         args.shipping_y,
         args.shipping_yaw,
     )
-    if not _bounded_loaded_prehandoff_rotation(
-        navigator, args, shipping_pose, localization_monitor
-    ):
-        return ExitCode.UNKNOWN
+    if not args.loaded_egress_extreme_left_90_experiment:
+        if not _bounded_loaded_prehandoff_rotation(
+            navigator, args, shipping_pose, localization_monitor
+        ):
+            return ExitCode.UNKNOWN
     if not _wait_for_loaded_handoff_clearance(
         navigator, args.loaded_handoff_costmap_timeout
     ):

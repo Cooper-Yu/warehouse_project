@@ -63,6 +63,13 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_egress_max_reverse_per_round == 0.25
     assert args.loaded_egress_max_rounds == 12
     assert args.loaded_egress_no_improvement_limit == 2
+    assert not args.loaded_egress_extreme_left_90_experiment
+    assert args.loaded_egress_extreme_target_yaw == pytest.approx(
+        math.pi / 2.0
+    )
+    assert args.loaded_egress_extreme_turn_step == 0.10
+    assert args.loaded_egress_extreme_reverse_per_turn == 0.05
+    assert args.loaded_egress_extreme_final_reverse == 0.20
     assert args.loaded_egress_arc_distance == 0.35
     assert args.loaded_egress_arc_yaw == 0.18
     assert args.loaded_egress_arc_angular_speed == 0.026
@@ -355,6 +362,98 @@ def test_loaded_egress_blocked_turn_reverses_without_rotating(monkeypatch):
     assert move_shelf_to_ship._loaded_egress_before_shipping(navigator, args)
     assert rotations == []
     assert reverses == pytest.approx([0.05])
+
+
+def test_extreme_left_experiment_alternates_to_ninety_then_final_reverse(
+    monkeypatch,
+):
+    rotations = []
+    reverses = []
+    risks = iter(((0, 0, 0, 10),) * 20)
+
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_loaded_turn_segment_safe", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_rotate_by_odom",
+        lambda _navigator, _topic, _odom, _base, yaw, *_rest: (
+            rotations.append(yaw) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_reverse_by_odom",
+        lambda _navigator, _topic, _odom, _base, distance, *_rest: (
+            reverses.append(distance) or True
+        ),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_settle_without_motion", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_read_loaded_current_risk",
+        lambda *_args: next(risks),
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_wait_for_loaded_handoff_clearance",
+        lambda *_args: True,
+    )
+
+    class Logger:
+        def info(self, _message):
+            pass
+
+        def warning(self, _message):
+            pass
+
+        def error(self, _message):
+            pass
+
+    navigator = SimpleNamespace(get_logger=lambda: Logger())
+    args = move_shelf_to_ship._parser().parse_args([])
+
+    assert move_shelf_to_ship._loaded_egress_extreme_left_90_experiment(
+        navigator, args
+    )
+    assert sum(rotations) == pytest.approx(math.pi / 2.0, abs=0.011)
+    assert all(value == pytest.approx(0.10) for value in rotations[:-1])
+    assert reverses[:-1] == pytest.approx([0.05] * len(rotations))
+    assert reverses[-1] == pytest.approx(0.20)
+
+
+def test_extreme_left_experiment_stops_when_a_turn_prefix_is_lethal(
+    monkeypatch,
+):
+    rotations = []
+    monkeypatch.setattr(
+        move_shelf_to_ship, "_loaded_turn_segment_safe", lambda *_args: False
+    )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_bounded_rotate_by_odom",
+        lambda *_args: rotations.append(True) or True,
+    )
+
+    class Logger:
+        def info(self, _message):
+            pass
+
+        def warning(self, _message):
+            pass
+
+        def error(self, _message):
+            pass
+
+    navigator = SimpleNamespace(get_logger=lambda: Logger())
+    args = move_shelf_to_ship._parser().parse_args([])
+
+    assert not move_shelf_to_ship._loaded_egress_extreme_left_90_experiment(
+        navigator, args
+    )
+    assert rotations == []
 
 
 def test_loaded_reverse_arc_requires_both_odom_targets_and_stops():
