@@ -25,6 +25,7 @@ setup(
         "scripts/collect_motion_evidence",
         "scripts/collect_slice1_evidence",
         "scripts/move_shelf_to_ship.py",
+        "scripts/move_shelf_to_ship_real.py",
     ],
     entry_points={
         "console_scripts": [
