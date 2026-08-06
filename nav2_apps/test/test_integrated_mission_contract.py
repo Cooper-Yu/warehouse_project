@@ -77,8 +77,8 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_handoff_costmap_timeout == 5.0
     assert args.loaded_handoff_sweep_step == 0.05
     assert args.loaded_handoff_path_lookahead == 0.30
-    assert args.loaded_handoff_max_nav_yaw == 0.60
-    assert args.loaded_handoff_max_turn_segment == 0.35
+    assert args.loaded_handoff_max_nav_yaw == 0.15
+    assert args.loaded_handoff_max_turn_segment == 0.10
     assert args.loaded_handoff_max_total_turn == 2.80
     assert args.loaded_handoff_max_turn_rounds == 8
     assert args.loaded_prealign_max_segment_yaw == 0.15
@@ -150,7 +150,7 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
     assert "DIRECT_NAV2_HANDOFF_AFTER_LIFT" in mission_source
 
 
-def test_default_integrated_route_uses_only_localization_safety_gate():
+def test_default_integrated_route_uses_bounded_rotation_and_localization_gate():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     mission_source = ast.get_source_segment(
@@ -168,9 +168,17 @@ def test_default_integrated_route_uses_only_localization_safety_gate():
     assert "_hold_zero_velocity" in default_branch
     assert "_wait_for_loaded_handoff_clearance" not in default_branch
     assert "_prealign_loaded_shipping_bearing" not in default_branch
-    assert "_bounded_loaded_prehandoff_rotation" not in default_branch
+    assert "_bounded_loaded_prehandoff_rotation" in default_branch
     assert "_controller_speed_snapshot" not in default_branch
     assert "_set_controller_speeds" not in default_branch
+    begin_index = default_branch.index(
+        "localization_monitor.begin_motion_monitoring()"
+    )
+    rotation_index = default_branch.index(
+        "_bounded_loaded_prehandoff_rotation"
+    )
+    navigation_index = default_branch.index("_navigate_to_shipping")
+    assert begin_index < rotation_index < navigation_index
 
 
 def test_localization_step_rejects_translation_and_yaw_jumps():
@@ -843,7 +851,7 @@ def test_loaded_prehandoff_rotation_is_segmented_and_rechecked():
 def test_loaded_prehandoff_rotation_consumes_large_yaw_in_small_segments(
     monkeypatch,
 ):
-    yaw_sequence = iter((-1.10, -0.70, -0.40))
+    yaw_sequence = iter((-0.30, -0.20, -0.10))
     rotations = []
 
     def assess(_navigator, _args, _pose, output):
@@ -878,8 +886,8 @@ def test_loaded_prehandoff_rotation_consumes_large_yaw_in_small_segments(
 
     navigator = SimpleNamespace(get_logger=lambda: Logger())
     args = SimpleNamespace(
-        loaded_handoff_max_nav_yaw=0.60,
-        loaded_handoff_max_turn_segment=0.35,
+        loaded_handoff_max_nav_yaw=0.15,
+        loaded_handoff_max_turn_segment=0.10,
         loaded_handoff_max_total_turn=2.80,
         loaded_handoff_max_turn_rounds=8,
         cmd_vel_topic="/cmd_vel",
@@ -898,7 +906,7 @@ def test_loaded_prehandoff_rotation_consumes_large_yaw_in_small_segments(
     assert move_shelf_to_ship._bounded_loaded_prehandoff_rotation(
         navigator, args, PoseStamped(), object()
     )
-    assert rotations == pytest.approx([-0.35, -0.35])
+    assert rotations == pytest.approx([-0.10, -0.10])
 
 
 def test_swept_clearance_samples_every_intermediate_yaw_and_fails_closed():

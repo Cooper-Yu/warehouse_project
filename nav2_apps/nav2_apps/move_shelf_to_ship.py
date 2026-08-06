@@ -279,10 +279,10 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-handoff-path-lookahead", type=float, default=0.30
     )
     parser.add_argument(
-        "--loaded-handoff-max-nav-yaw", type=float, default=0.60
+        "--loaded-handoff-max-nav-yaw", type=float, default=0.15
     )
     parser.add_argument(
-        "--loaded-handoff-max-turn-segment", type=float, default=0.35
+        "--loaded-handoff-max-turn-segment", type=float, default=0.10
     )
     parser.add_argument(
         "--loaded-handoff-max-total-turn", type=float, default=2.80
@@ -3648,10 +3648,21 @@ def _run_integrated_mission(
             )
             return ExitCode.UNKNOWN
         localization_monitor.begin_motion_monitoring()
+        if not _bounded_loaded_prehandoff_rotation(
+            navigator,
+            args,
+            shipping_pose,
+            localization_monitor,
+        ):
+            _hold_zero_velocity(navigator, args.cmd_vel_topic)
+            navigator.get_logger().error(
+                "DIRECT_NAV2_HANDOFF_BLOCKED_PREHANDOFF_ROTATION"
+            )
+            return ExitCode.UNKNOWN
         navigator.get_logger().info(
             "DIRECT_NAV2_HANDOFF_AFTER_LIFT: loaded footprint verified; "
-            "stopped map-to-odom stability gate passed; custom egress and "
-            "prealignment skipped"
+            "stopped map-to-odom stability gate and bounded path-bearing "
+            "rotation passed; custom egress skipped"
         )
         shipping_result = _navigate_to_shipping(
             navigator,
