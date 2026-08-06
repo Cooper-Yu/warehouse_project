@@ -211,6 +211,9 @@ class ShelfDetectionServer(Node):
         # The executor remains opt-in until a separate simulation runtime
         # gate accepts the connected motion path.
         self.declare_parameter("lateral_execution_enabled", False)
+        # Lateral corrections have a separate finite budget so staging and
+        # heading convergence cannot consume every lateral opportunity.
+        self.declare_parameter("lateral_correction_limit", 2)
         # Positive target means the shelf midpoint remains to the robot's
         # left, placing the robot slightly right of geometric center.
         self.declare_parameter("lateral_target_offset", 0.0)
@@ -1126,6 +1129,10 @@ class ShelfDetectionServer(Node):
         lateral_execution_enabled = bool(
             self.get_parameter("lateral_execution_enabled").value
         )
+        lateral_correction_limit = max(
+            0,
+            int(self.get_parameter("lateral_correction_limit").value),
+        )
         max_drive = max(
             0.0,
             float(
@@ -1185,8 +1192,16 @@ class ShelfDetectionServer(Node):
             ),
         )
         aligned_samples = 0
-        correction_count = 0
-        observation_limit = retry_count + required_aligned_samples
+        alignment_correction_count = 0
+        lateral_correction_count = 0
+        lateral_observation_allowance = (
+            lateral_correction_limit if lateral_execution_enabled else 0
+        )
+        observation_limit = (
+            retry_count
+            + lateral_observation_allowance
+            + required_aligned_samples
+        )
 
         for observation in range(1, observation_limit + 1):
             if time.monotonic() >= deadline:
@@ -1245,7 +1260,10 @@ class ShelfDetectionServer(Node):
             self.get_logger().info(
                 "safe-standoff alignment sample: "
                 f"observation={observation}/{observation_limit} "
-                f"corrections={correction_count}/{retry_count} "
+                "alignment_corrections="
+                f"{alignment_correction_count}/{retry_count} "
+                "lateral_corrections="
+                f"{lateral_correction_count}/{lateral_correction_limit} "
                 f"x={x:.3f} y={y:.3f} "
                 f"shelf_normal_yaw={shelf_heading:.3f} "
                 f"staging_error={position_error:.3f}"
@@ -1260,10 +1278,10 @@ class ShelfDetectionServer(Node):
                 )
             ):
                 aligned_samples = 0
-                if correction_count >= retry_count:
+                if lateral_correction_count >= lateral_correction_limit:
                     self.get_logger().error(
-                        "lateral-centering stopped: correction budget "
-                        "exhausted"
+                        "lateral-centering stopped: lateral correction "
+                        "budget exhausted"
                     )
                     break
                 stopped_yaw = self._wait_for_stable_odom_yaw(deadline)
@@ -1312,12 +1330,14 @@ class ShelfDetectionServer(Node):
                         "clearance rejected"
                     )
                     return None
-                correction_count += 1
+                lateral_correction_count += 1
                 self.get_logger().info(
                     "lateral-centering bounded action selected: "
                     f"yaw={plan.signed_yaw:.3f} "
                     f"distance={plan.drive_distance:.3f} "
-                    f"correction={correction_count}/{retry_count}"
+                    "lateral_correction="
+                    f"{lateral_correction_count}/"
+                    f"{lateral_correction_limit}"
                 )
                 target = self._execute_lateral_action(
                     target,
@@ -1333,13 +1353,13 @@ class ShelfDetectionServer(Node):
             scan_before_motion = self._current_scan_sequence()
             if position_error > position_tolerance:
                 aligned_samples = 0
-                if correction_count >= retry_count:
+                if alignment_correction_count >= retry_count:
                     self.get_logger().error(
                         "safe-standoff alignment stopped: correction "
                         "budget exhausted before position tolerance"
                     )
                     break
-                correction_count += 1
+                alignment_correction_count += 1
                 if max_drive <= 0.0:
                     self.get_logger().error(
                         "safe-standoff alignment rejected: maximum staging "
@@ -1449,13 +1469,13 @@ class ShelfDetectionServer(Node):
                     return None
             elif not heading_ok:
                 aligned_samples = 0
-                if correction_count >= retry_count:
+                if alignment_correction_count >= retry_count:
                     self.get_logger().error(
                         "safe-standoff alignment stopped: correction "
                         "budget exhausted before heading tolerance"
                     )
                     break
-                correction_count += 1
+                alignment_correction_count += 1
                 (
                     correction,
                     correction_speed,

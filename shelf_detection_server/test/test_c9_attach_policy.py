@@ -70,6 +70,7 @@ class _AlignmentHarness:
             "alignment_position_tolerance": 0.08,
             "center_lateral_tolerance": 0.08,
             "lateral_execution_enabled": False,
+            "lateral_correction_limit": 2,
             "lateral_target_offset": 0.0,
             "lateral_target_tolerance": 0.02,
             "lateral_correction_ratio": 0.50,
@@ -198,6 +199,7 @@ def test_c9_policy_parameters_are_declared():
     assert declared["alignment_standoff_distance"] == 1.00
     assert declared["alignment_position_tolerance"] == 0.08
     assert declared["alignment_retry_count"] == 6
+    assert declared["lateral_correction_limit"] == 2
     assert declared["alignment_max_drive_distance"] == 0.75
     assert declared["alignment_max_travel_yaw"] == 1.20
     assert declared["alignment_short_drive_distance"] == 0.20
@@ -715,6 +717,7 @@ def test_lateral_execution_remains_bounded_by_correction_budget():
         stable_yaws=[0.0],
     )
     harness.parameters["lateral_execution_enabled"] = True
+    harness.parameters["lateral_correction_limit"] = 1
     lateral_calls = []
 
     def execute(*args):
@@ -733,6 +736,37 @@ def test_lateral_execution_remains_bounded_by_correction_budget():
     assert harness.rotations == []
     assert harness.drives == []
     assert harness.stop_count == 1
+
+
+def test_alignment_budget_exhaustion_does_not_consume_lateral_budget():
+    lateral_target = ("base", 1.0, 0.0, 0.0)
+    aligned_target = ("base", 1.0, 0.03, 0.0)
+    harness = _AlignmentHarness(
+        [lateral_target, aligned_target],
+        retry_count=1,
+        stable_yaws=[0.0, 0.0, 0.0, 0.0],
+    )
+    harness.parameters["lateral_execution_enabled"] = True
+    harness.parameters["lateral_correction_limit"] = 1
+    harness.parameters["lateral_target_offset"] = 0.03
+    harness.parameters["lateral_target_tolerance"] = 0.02
+    lateral_calls = []
+
+    def execute(*args):
+        lateral_calls.append(args)
+        return aligned_target
+
+    harness._execute_lateral_action = execute
+
+    result = harness._align_at_safe_standoff(
+        ("base", math.cos(0.10), math.sin(0.10), 0.10),
+        time.monotonic() + 10.0,
+    )
+
+    assert result == (aligned_target, 0.0)
+    assert harness.rotations == pytest.approx([0.05])
+    assert len(lateral_calls) == 1
+    assert harness.recovered_targets == []
 
 
 def test_lateral_predicted_endpoint_rejection_creates_no_motion():
