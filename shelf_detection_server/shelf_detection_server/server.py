@@ -197,6 +197,9 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("alignment_fine_speed_gain", 0.0)
         self.declare_parameter("alignment_standoff_distance", 1.00)
         self.declare_parameter("alignment_position_tolerance", 0.08)
+        # Real profiles may disable only the initial geometric acceptance gate;
+        # fresh detection and odometry heading stability remain mandatory.
+        self.declare_parameter("entry_standoff_geometry_gate_enabled", True)
         self.declare_parameter("alignment_retry_count", 6)
         self.declare_parameter("alignment_max_drive_distance", 0.75)
         self.declare_parameter("alignment_max_travel_yaw", 1.20)
@@ -629,7 +632,7 @@ class ShelfDetectionServer(Node):
         )
         deadline = time.monotonic() + timeout
         while rclpy.ok() and time.monotonic() < deadline:
-            if (
+            if geometry_gate_enabled and (
                 after_sequence is not None
                 and self._current_scan_sequence() <= after_sequence
             ):
@@ -883,6 +886,8 @@ class ShelfDetectionServer(Node):
             ),
         )
 
+        geometry_gate_enabled = bool(self.get_parameter("entry_standoff_geometry_gate_enabled").value)
+
         for sample in range(1, required_samples + 1):
             if time.monotonic() >= deadline:
                 break
@@ -897,7 +902,7 @@ class ShelfDetectionServer(Node):
                 f"position_error={position_error:.3f} "
                 f"shelf_normal_yaw={shelf_heading:.3f}"
             )
-            if (
+            if geometry_gate_enabled and (
                 position_error > position_tolerance
                 or not shelf_heading_aligned(
                     shelf_heading, yaw_tolerance
@@ -909,6 +914,8 @@ class ShelfDetectionServer(Node):
                     "is outside position or heading tolerance"
                 )
                 return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
             accepted_odom_yaw = self._wait_for_stable_odom_yaw(deadline)
             if accepted_odom_yaw is None:
                 self._publish_stop()
@@ -916,6 +923,8 @@ class ShelfDetectionServer(Node):
                     "entry-only rejected: accepted odom yaw did not settle"
                 )
                 return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
             if sample >= required_samples:
                 self.get_logger().info(
                     "entry-only safe-standoff accepted without motion: "
@@ -936,6 +945,8 @@ class ShelfDetectionServer(Node):
                     "unavailable"
                 )
                 return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
 
         self._publish_stop()
         self.get_logger().error(
@@ -1214,6 +1225,8 @@ class ShelfDetectionServer(Node):
                     f"{max_detected_yaw:.3f}"
                 )
                 return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
 
             error_x, error_y = shelf_staging_error(
                 x, y, shelf_heading, standoff
@@ -1319,6 +1332,8 @@ class ShelfDetectionServer(Node):
                         "rejected the candidate"
                     )
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 if not self._lateral_action_clearance_accepted(
                     target,
                     plan.signed_yaw,
@@ -1330,6 +1345,8 @@ class ShelfDetectionServer(Node):
                         "clearance rejected"
                     )
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 lateral_correction_count += 1
                 self.get_logger().info(
                     "lateral-centering bounded action selected: "
@@ -1348,6 +1365,8 @@ class ShelfDetectionServer(Node):
                 )
                 if target is None:
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 continue
 
             scan_before_motion = self._current_scan_sequence()
@@ -1366,6 +1385,8 @@ class ShelfDetectionServer(Node):
                         "drive is not positive"
                     )
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 motion = staging_motion_command(
                     error_x,
                     error_y,
@@ -1385,6 +1406,8 @@ class ShelfDetectionServer(Node):
                         f"yaw={reverse_yaw:.3f}/{max_reverse_yaw:.3f}"
                     )
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 travel_yaw, signed_distance, motion_mode = motion
                 if motion_mode == "reverse":
                     minimum_safe_x = max(
@@ -1397,6 +1420,8 @@ class ShelfDetectionServer(Node):
                             f"{minimum_safe_x:.3f}"
                         )
                         return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 staging_entry_odom_yaw = (
                     self._wait_for_stable_odom_yaw(deadline)
                 )
@@ -1406,14 +1431,20 @@ class ShelfDetectionServer(Node):
                         "heading did not settle"
                     )
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 if abs(travel_yaw) > yaw_tolerance and not (
                     self._rotate_measured(travel_yaw, deadline)
                 ):
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 if abs(travel_yaw) > yaw_tolerance and (
                     self._wait_for_stable_odom_yaw(deadline) is None
                 ):
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 staging_distance = min(abs(signed_distance), max_drive)
                 signed_staging_distance = math.copysign(
                     staging_distance, signed_distance
@@ -1441,6 +1472,8 @@ class ShelfDetectionServer(Node):
                     staging_speed,
                 ):
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 post_drive_odom_yaw = self._wait_for_stable_odom_yaw(
                     deadline
                 )
@@ -1450,6 +1483,8 @@ class ShelfDetectionServer(Node):
                         "heading did not settle"
                     )
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 restore_yaw = normalize_angle(
                     staging_entry_odom_yaw - post_drive_odom_yaw
                 )
@@ -1463,10 +1498,14 @@ class ShelfDetectionServer(Node):
                     self._rotate_measured(restore_yaw, deadline)
                 ):
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 if abs(restore_yaw) > yaw_tolerance and (
                     self._wait_for_stable_odom_yaw(deadline) is None
                 ):
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
             elif not heading_ok:
                 aligned_samples = 0
                 if alignment_correction_count >= retry_count:
@@ -1528,8 +1567,12 @@ class ShelfDetectionServer(Node):
                     correction, deadline, correction_speed
                 ):
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 if self._wait_for_stable_odom_yaw(deadline) is None:
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
             else:
                 accepted_odom_yaw = self._wait_for_stable_odom_yaw(deadline)
                 if accepted_odom_yaw is None:
@@ -1539,6 +1582,8 @@ class ShelfDetectionServer(Node):
                         "yaw did not settle"
                     )
                     return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
                 aligned_samples += 1
                 self.get_logger().info(
                     "safe-standoff alignment candidate: "
@@ -1567,6 +1612,8 @@ class ShelfDetectionServer(Node):
                     "observation unavailable"
                 )
                 return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
 
         self._publish_stop()
         self.get_logger().error(
@@ -1590,6 +1637,8 @@ class ShelfDetectionServer(Node):
         for retry in range(1, retry_count + 1):
             if time.monotonic() >= deadline:
                 return None
+            if not geometry_gate_enabled:
+                self.get_logger().warning("entry-only standoff geometry gate disabled by profile; continuing with fresh cart_frame and odom heading guard")
             time.sleep(0.3)
             target = self._wait_for_cart_frame(
                 after_sequence, timeout_seconds=0.5

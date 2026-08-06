@@ -17,6 +17,7 @@ shelf_detection_server:
     alignment_standoff_distance: 1.00
     alignment_position_tolerance: 0.08
     alignment_required_consecutive_samples: 2
+    entry_standoff_geometry_gate_enabled: false
 
     # Reuse the measured simulation stepwise approach at reduced real speed.
     forward_speed: 0.05
