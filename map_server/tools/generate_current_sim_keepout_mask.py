@@ -38,7 +38,7 @@ def main():
     output = (
         Path(__file__).resolve().parents[1]
         / "config"
-        / "warehouse_map_current_sim_keepout_mask.pgm"
+        / "warehouse_map_keepout_sim_mask.pgm"
     )
 
     rows = []
@@ -57,7 +57,7 @@ def main():
     contents = "\n".join(
         [
             "P2",
-            "# warehouse_map_current_sim_keepout_mask: 0=keepout, 254=free",
+            "# warehouse_map_keepout_sim_mask: 0=keepout, 254=free",
             f"{WIDTH} {HEIGHT}",
             "255",
             *rows,

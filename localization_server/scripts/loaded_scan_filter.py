@@ -4,6 +4,7 @@
 import math
 from typing import Iterable, Sequence, Tuple
 
+from geometry_msgs.msg import PolygonStamped
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -12,6 +13,19 @@ from std_msgs.msg import String
 
 
 AngleSector = Tuple[float, float]
+
+
+def maximum_polygon_edge(points: Sequence) -> float:
+    """Return the longest closed-polygon edge, or infinity if incomplete."""
+    if len(points) < 3:
+        return math.inf
+    return max(
+        math.hypot(
+            points[(index + 1) % len(points)].x - point.x,
+            points[(index + 1) % len(points)].y - point.y,
+        )
+        for index, point in enumerate(points)
+    )
 
 
 def filter_ranges(
@@ -45,8 +59,12 @@ class LoadedScanFilter(Node):
         self.declare_parameter("right_sector_min", -2.3562)
         self.declare_parameter("right_sector_max", -1.111)
         self.declare_parameter("maximum_self_range", 0.60)
+        self.declare_parameter(
+            "unloaded_footprint_max_edge", 0.55
+        )
 
         self._loaded = False
+        self._lowering_seen = False
         self._sectors = (
             (
                 float(self.get_parameter("right_sector_min").value),
@@ -60,6 +78,9 @@ class LoadedScanFilter(Node):
         self._maximum_self_range = float(
             self.get_parameter("maximum_self_range").value
         )
+        self._unloaded_footprint_max_edge = float(
+            self.get_parameter("unloaded_footprint_max_edge").value
+        )
         input_topic = str(self.get_parameter("input_topic").value)
         output_topic = str(self.get_parameter("output_topic").value)
         self._publisher = self.create_publisher(
@@ -72,6 +93,12 @@ class LoadedScanFilter(Node):
         self.create_subscription(
             String, "/elevator_down", self._down_callback, 10
         )
+        self.create_subscription(
+            PolygonStamped,
+            "/local_costmap/published_footprint",
+            self._footprint_callback,
+            10,
+        )
         self.get_logger().info(
             "localization scan filter ready: unloaded pass-through; loaded "
             f"near self-returns <= {self._maximum_self_range:.2f} m removed"
@@ -80,15 +107,29 @@ class LoadedScanFilter(Node):
     def _up_callback(self, message: String) -> None:
         if message.data.strip().lower() == "up" and not self._loaded:
             self._loaded = True
+            self._lowering_seen = False
             self.get_logger().warning(
                 "LOADED_SCAN_FILTER_ACTIVE: AMCL self-return filtering enabled"
             )
 
     def _down_callback(self, message: String) -> None:
         if message.data.strip().lower() == "down" and self._loaded:
-            self._loaded = False
+            self._lowering_seen = True
             self.get_logger().info(
-                "LOADED_SCAN_FILTER_INACTIVE: AMCL raw scan pass-through restored"
+                "LOADED_SCAN_FILTER_LOWERING: filtering retained until "
+                "the unloaded footprint is restored"
+            )
+
+    def _footprint_callback(self, message: PolygonStamped) -> None:
+        if not (self._loaded and self._lowering_seen):
+            return
+        maximum_edge = maximum_polygon_edge(message.polygon.points)
+        if maximum_edge <= self._unloaded_footprint_max_edge:
+            self._loaded = False
+            self._lowering_seen = False
+            self.get_logger().info(
+                "LOADED_SCAN_FILTER_INACTIVE: unloaded footprint verified; "
+                "AMCL raw scan pass-through restored"
             )
 
     def _scan_callback(self, message: LaserScan) -> None:

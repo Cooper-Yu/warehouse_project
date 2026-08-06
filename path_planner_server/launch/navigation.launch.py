@@ -107,7 +107,7 @@ def generate_launch_description():
     # One argument switches every environment-specific file as a unit.
     sim_files = {
         "map": PathJoinSubstitution([
-            map_share, "config", "warehouse_map_sim.yaml"
+            map_share, "config", "warehouse_map_keepout_sim.yaml"
         ]),
         "amcl": PathJoinSubstitution([
             localization_share, "config", "amcl_config_sim.yaml"

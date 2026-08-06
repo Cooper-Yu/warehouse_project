@@ -2,6 +2,8 @@ import importlib.util
 import math
 from pathlib import Path
 
+from geometry_msgs.msg import Point32
+
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "loaded_scan_filter.py"
 SPEC = importlib.util.spec_from_file_location("loaded_scan_filter", SCRIPT)
@@ -37,3 +39,21 @@ def test_existing_invalid_ranges_remain_invalid():
 
     assert math.isinf(result[0])
     assert math.isnan(result[1])
+
+
+def _square(half_extent):
+    return [
+        Point32(x=half_extent, y=half_extent),
+        Point32(x=-half_extent, y=half_extent),
+        Point32(x=-half_extent, y=-half_extent),
+        Point32(x=half_extent, y=-half_extent),
+    ]
+
+
+def test_footprint_edge_distinguishes_loaded_and_unloaded_profiles():
+    assert math.isclose(MODULE.maximum_polygon_edge(_square(0.30)), 0.60)
+    assert math.isclose(MODULE.maximum_polygon_edge(_square(0.25)), 0.50)
+
+
+def test_incomplete_footprint_cannot_disable_filtering():
+    assert math.isinf(MODULE.maximum_polygon_edge(_square(0.25)[:2]))

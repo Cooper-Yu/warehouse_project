@@ -31,7 +31,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "map_file",
-            default_value="warehouse_map_sim.yaml",
+            default_value="warehouse_map_keepout_sim.yaml",
             description="Map YAML file to load from the map_server config folder.",
         ),
         DeclareLaunchArgument(

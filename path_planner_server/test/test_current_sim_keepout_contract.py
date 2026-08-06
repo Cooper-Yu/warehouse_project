@@ -27,21 +27,21 @@ def _read_p2(path):
 
 def test_current_sim_keepout_metadata_matches_cleared_map():
     map_yaml = yaml.safe_load(
-        (MAP_CONFIG / "warehouse_map_current_sim_cleared.yaml").read_text()
+        (MAP_CONFIG / "warehouse_map_keepout_sim.yaml").read_text()
     )
     mask_yaml = yaml.safe_load(
-        (MAP_CONFIG / "warehouse_map_current_sim_keepout_mask.yaml").read_text()
+        (MAP_CONFIG / "warehouse_map_keepout_sim_mask.yaml").read_text()
     )
 
     assert map_yaml["resolution"] == mask_yaml["resolution"] == 0.05
     assert map_yaml["origin"] == mask_yaml["origin"] == [-1.01, -4.24, 0]
     assert mask_yaml["mode"] == "scale"
-    assert mask_yaml["image"] == "warehouse_map_current_sim_keepout_mask.pgm"
+    assert mask_yaml["image"] == "warehouse_map_keepout_sim_mask.pgm"
 
 
 def test_current_sim_keepout_mask_has_aligned_binary_geometry():
     magic, width, height, maximum, values, comment = _read_p2(
-        MAP_CONFIG / "warehouse_map_current_sim_keepout_mask.pgm"
+        MAP_CONFIG / "warehouse_map_keepout_sim_mask.pgm"
     )
 
     assert (magic, width, height, maximum) == ("P2", 153, 127, 255)

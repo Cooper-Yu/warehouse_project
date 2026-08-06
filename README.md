@@ -32,11 +32,11 @@ ros2 launch cartographer_slam cartographer.launch.py use_sim_time:=true
 ros2 launch cartographer_slam cartographer.launch.py use_sim_time:=false
 
 # Saved map
-ros2 launch map_server map_server.launch.py map_file:=warehouse_map_sim.yaml
+ros2 launch map_server map_server.launch.py map_file:=warehouse_map_keepout_sim.yaml
 ros2 launch map_server map_server.launch.py map_file:=warehouse_map_real.yaml
 
 # Localization
-ros2 launch localization_server localization.launch.py map_file:=warehouse_map_sim.yaml
+ros2 launch localization_server localization.launch.py map_file:=warehouse_map_keepout_sim.yaml
 ros2 launch localization_server localization.launch.py map_file:=warehouse_map_real.yaml
 
 # Navigation
