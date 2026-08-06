@@ -1075,12 +1075,21 @@ def _restore_amcl_after_freeze(
     lifecycle_timeout: float,
 ) -> bool:
     frozen.stop()
-    restored = _change_amcl_state(
-        navigator,
-        Transition.TRANSITION_ACTIVATE,
-        State.PRIMARY_STATE_ACTIVE,
-        lifecycle_timeout,
-    )
+    state = _amcl_state(navigator, lifecycle_timeout)
+    if state == State.PRIMARY_STATE_ACTIVE:
+        restored = True
+    elif state == State.PRIMARY_STATE_INACTIVE:
+        restored = _change_amcl_state(
+            navigator,
+            Transition.TRANSITION_ACTIVATE,
+            State.PRIMARY_STATE_ACTIVE,
+            lifecycle_timeout,
+        )
+    else:
+        restored = False
+        navigator.get_logger().error(
+            f"MAP_ODOM_FREEZE_RELEASE_REJECTED: unexpected AMCL state {state}"
+        )
     if restored:
         navigator.get_logger().warning("MAP_ODOM_FREEZE_RELEASED_AMCL_ACTIVE")
     else:
