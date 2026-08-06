@@ -88,6 +88,10 @@ def generate_launch_description():
     keepout_mask_file = LaunchConfiguration("keepout_mask_file")
     package_share = FindPackageShare("path_planner_server")
     map_package_share = FindPackageShare("map_server")
+    shelf_package_share = FindPackageShare("shelf_detection_server")
+    real_detection_config = PathJoinSubstitution(
+        [shelf_package_share, "config", "real_entry.yaml"]
+    )
 
     keepout_mask_yaml = PathJoinSubstitution(
         [map_package_share, "config", keepout_mask_file]
@@ -259,6 +263,17 @@ def generate_launch_description():
                         "alignment_fine_speed_gain": 0.50,
                         "alignment_heading_hold_tolerance": 0.04,
                     }
+                ],
+            ),
+            Node(
+                package="shelf_detection_server",
+                executable="shelf_detection_server",
+                name="shelf_detection_server",
+                output="screen",
+                condition=UnlessCondition(use_sim_time),
+                parameters=[
+                    real_detection_config,
+                    {"use_sim_time": ParameterValue(use_sim_time, value_type=bool)},
                 ],
             ),
             Node(
