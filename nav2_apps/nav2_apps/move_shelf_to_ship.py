@@ -141,6 +141,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--stop-at-shipping",
+        action="store_true",
+        help=(
+            "In integrated mode, stop successfully after the validated "
+            "shipping pose instead of refining placement, lowering, exiting, "
+            "and returning to the initial pose."
+        ),
+    )
+    parser.add_argument(
         "--shipping-alignment-only",
         action="store_true",
         help=(
@@ -3446,6 +3455,13 @@ def _run_integrated_mission(
         )
     if shipping_result != ExitCode.SUCCEEDED:
         return shipping_result
+
+    if args.stop_at_shipping:
+        navigator.get_logger().info(
+            "INTEGRATED_STOP_AT_SHIPPING: shipping accepted; lower, exit, "
+            "and return skipped"
+        )
+        return ExitCode.SUCCEEDED
 
     if not _bounded_forward_by_odom(
         navigator,

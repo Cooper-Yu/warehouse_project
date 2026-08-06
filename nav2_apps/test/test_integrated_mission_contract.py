@@ -43,6 +43,7 @@ def test_no_mission_flags_selects_integrated_course_route():
     )
 
     assert not any(operation_modes)
+    assert not args.stop_at_shipping
     assert args.shipping_refine_distance == 0.16
     assert args.loaded_footprint == (
         "[[0.40, 0.40], [-0.40, 0.40], "
@@ -100,6 +101,23 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.exit_distance == 0.75
     assert args.clearance_refine_distance == 0.02
     assert args.clearance_x == 0.36
+
+
+def test_integrated_stop_at_shipping_is_bounded_before_unload_actions():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    integrated = _function(tree, "_run_integrated_mission")
+    function_source = ast.get_source_segment(source, integrated)
+
+    stop_index = function_source.index("if args.stop_at_shipping")
+    refine_index = function_source.index("_bounded_forward_by_odom")
+    lower_index = function_source.index("_publish_elevator_down_and_wait")
+    exit_index = function_source.index("_exit_restore_integrated")
+
+    assert "--stop-at-shipping" in source
+    assert "INTEGRATED_STOP_AT_SHIPPING" in function_source
+    assert stop_index < refine_index < lower_index < exit_index
+    assert "return ExitCode.SUCCEEDED" in function_source[stop_index:refine_index]
 
 
 def test_integrated_route_contains_complete_fail_closed_sequence():
