@@ -38,6 +38,8 @@ global_costmap:
           raytrace_max_range: 3.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.50
+        cost_scaling_factor: 10.0
       keepout_filter:
         plugin: "nav2_costmap_2d::KeepoutFilter"
         enabled: true
