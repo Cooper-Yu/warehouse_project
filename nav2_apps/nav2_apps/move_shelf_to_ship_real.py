@@ -17,6 +17,7 @@ REAL_UNLOADED_FOOTPRINT = "[[0.25, 0.25], [-0.25, 0.25], [-0.25, -0.25], [0.25, 
 REAL_LOADED_FOOTPRINT = "[[0.40, 0.40], [-0.40, 0.40], [-0.40, -0.40], [0.40, -0.40]]"
 REAL_LOADING_POSE = (0.0429566167, 0.6762173176, -1.5707963268)
 REAL_SHIPPING_POSE = (-2.5911982059, 1.8469729424, 1.5707963268)
+REAL_RETURN_POSE = (-4.307, 0.209, 0.198)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -28,7 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     for prefix in ("loading", "shipping", "return"):
         for axis in ("x", "y", "yaw"):
-            p.add_argument(f"--{prefix}-{axis}", type=float, required=(prefix == "return"), default=(REAL_LOADING_POSE if prefix == "loading" else REAL_SHIPPING_POSE if prefix == "shipping" else None)[{"x":0,"y":1,"yaw":2}[axis]])
+            p.add_argument(f"--{prefix}-{axis}", type=float, required=False, default=(REAL_LOADING_POSE if prefix == "loading" else REAL_SHIPPING_POSE if prefix == "shipping" else REAL_RETURN_POSE)[{"x":0,"y":1,"yaw":2}[axis]])
     p.add_argument("--loaded-footprint", default=REAL_LOADED_FOOTPRINT)
     p.add_argument("--unloaded-footprint", default=REAL_UNLOADED_FOOTPRINT)
     p.add_argument("--shelf-service", default="/approach_shelf")
