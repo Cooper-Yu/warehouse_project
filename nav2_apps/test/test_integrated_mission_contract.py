@@ -96,6 +96,8 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_localization_sample_interval == 0.20
     assert args.loaded_localization_max_position_jump == 0.10
     assert args.loaded_localization_max_yaw_jump == 0.10
+    assert args.loaded_localization_recovery_samples == 11
+    assert args.loaded_localization_recovery_timeout == 5.0
     assert args.loaded_map_odom_freeze_lifecycle_timeout == 5.0
     assert args.loaded_shipping_max_linear_speed == 0.15
     assert args.loaded_shipping_max_angular_speed == 0.30

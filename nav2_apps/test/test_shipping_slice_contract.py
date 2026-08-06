@@ -345,6 +345,11 @@ def test_shipping_localization_jump_cancels_before_completion(monkeypatch):
         "_hold_zero_velocity",
         lambda _navigator, topic: zero_holds.append(topic),
     )
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_wait_for_localization_recovery",
+        lambda *_args, **_kwargs: False,
+    )
 
     result = move_shelf_to_ship._navigate_to_shipping(
         navigator,

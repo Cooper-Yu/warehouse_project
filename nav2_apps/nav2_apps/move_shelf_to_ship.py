@@ -366,6 +366,12 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-localization-max-yaw-jump", type=float, default=0.10
     )
     parser.add_argument(
+        "--loaded-localization-recovery-samples", type=int, default=11
+    )
+    parser.add_argument(
+        "--loaded-localization-recovery-timeout", type=float, default=5.0
+    )
+    parser.add_argument(
         "--loaded-map-odom-freeze-lifecycle-timeout",
         type=float,
         default=5.0,
@@ -878,6 +884,36 @@ class _LoadedLocalizationMonitor:
             )
             return True
         return stable
+
+    def sample_against_baseline(self) -> Optional[bool]:
+        """Read one sample for recovery without requiring step continuity."""
+        import tf2_ros
+
+        try:
+            transform = self.buffer.lookup_transform(
+                "map", self.odom_frame, rclpy.time.Time()
+            )
+        except tf2_ros.TransformException:
+            return None
+        current = (
+            transform.transform.translation.x,
+            transform.transform.translation.y,
+            _yaw_from_rotation(transform.transform.rotation),
+        )
+        if self.baseline is None:
+            self.baseline = current
+        self.last_position_drift = math.hypot(
+            current[0] - self.baseline[0],
+            current[1] - self.baseline[1],
+        )
+        self.last_yaw_drift = abs(
+            _normalize_angle(current[2] - self.baseline[2])
+        )
+        self.previous = current
+        return (
+            self.last_position_drift <= self.max_position_jump
+            and self.last_yaw_drift <= self.max_yaw_jump
+        )
 
 
 def _amcl_state(navigator: BasicNavigator, timeout: float) -> Optional[int]:
@@ -3161,6 +3197,45 @@ def _hold_zero_velocity(
         navigator.destroy_publisher(publisher)
 
 
+def _wait_for_localization_recovery(
+    navigator: BasicNavigator,
+    monitor: _LoadedLocalizationMonitor,
+    sample_count: int,
+    sample_interval: float,
+    timeout: float,
+) -> bool:
+    """Require a stable return to the accepted pre-jump baseline."""
+    if sample_count < 2 or sample_interval <= 0.0 or timeout <= 0.0:
+        return False
+    deadline = time.monotonic() + timeout
+    accepted = 0
+    next_sample_at = time.monotonic()
+    while rclpy.ok() and time.monotonic() < deadline:
+        now = time.monotonic()
+        if now < next_sample_at:
+            rclpy.spin_once(navigator, timeout_sec=min(0.1, next_sample_at - now))
+            continue
+        stable = monitor.sample_against_baseline()
+        if stable is None:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            continue
+        if not stable:
+            accepted = 0
+        else:
+            accepted += 1
+            if accepted >= sample_count:
+                navigator.get_logger().info(
+                    "LOADED_LOCALIZATION_RECOVERED_TO_BASELINE: "
+                    f"samples={accepted}/{sample_count}"
+                )
+                return True
+        next_sample_at = time.monotonic() + sample_interval
+    navigator.get_logger().error(
+        "LOADED_LOCALIZATION_RECOVERY_FAILED: baseline did not stabilize"
+    )
+    return False
+
+
 def _navigate_to_shipping(
     navigator: BasicNavigator,
     shipping_pose: PoseStamped,
@@ -3176,6 +3251,12 @@ def _navigate_to_shipping(
     max_correction_rounds: int = 3,
     localization_monitor: Optional[_LoadedLocalizationMonitor] = None,
     cmd_vel_topic: str = "/cmd_vel",
+    recovery_samples: int = 11,
+    recovery_interval: float = 0.20,
+    recovery_timeout: float = 5.0,
+    recovery_planner_id: str = "GridBased",
+    recovery_path_timeout: float = 5.0,
+    recovery_path_tolerance: float = 0.55,
 ) -> ExitCode:
     """Navigate once to shipping and expose a bounded terminal result."""
     if timeout <= 0.0:
@@ -3191,6 +3272,7 @@ def _navigate_to_shipping(
         return ExitCode.GOAL_REJECTED
 
     deadline = time.monotonic() + timeout
+    recovery_attempted = False
     while not navigator.isTaskComplete():
         if time.monotonic() >= deadline:
             navigator.cancelTask()
@@ -3204,6 +3286,36 @@ def _navigate_to_shipping(
             if localization_stable is False:
                 navigator.cancelTask()
                 _hold_zero_velocity(navigator, cmd_vel_topic)
+                if (
+                    not recovery_attempted
+                    and _wait_for_localization_recovery(
+                        navigator,
+                        localization_monitor,
+                        recovery_samples,
+                        recovery_interval,
+                        recovery_timeout,
+                    )
+                    and _wait_for_loaded_handoff_clearance(
+                        navigator, recovery_path_timeout
+                    )
+                    and _bounded_loaded_shipping_path_probe(
+                        navigator,
+                        shipping_pose,
+                        recovery_planner_id,
+                        recovery_path_timeout,
+                        recovery_path_tolerance,
+                    )
+                    == PathProbeResult.PATH_READY
+                ):
+                    recovery_attempted = True
+                    navigator.get_logger().warning(
+                        "LOADED_LOCALIZATION_RECOVERY_REPLAN: one bounded "
+                        "shipping retry authorized"
+                    )
+                    if not navigator.goToPose(shipping_pose):
+                        return ExitCode.GOAL_REJECTED
+                    deadline = time.monotonic() + timeout
+                    continue
                 navigator.get_logger().error(
                     "shipping canceled: loaded localization jump detected "
                     f"translation="
@@ -3479,6 +3591,12 @@ def _run_integrated_mission(
             args.shipping_yaw_correction_rounds,
             localization_monitor,
             args.cmd_vel_topic,
+            args.loaded_localization_recovery_samples,
+            args.loaded_localization_sample_interval,
+            args.loaded_localization_recovery_timeout,
+            args.loaded_prealign_planner_id,
+            args.loaded_prealign_path_probe_timeout,
+            args.loaded_prealign_path_end_tolerance,
         )
     else:
         navigator.get_logger().warning(
