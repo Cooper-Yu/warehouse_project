@@ -98,6 +98,9 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_localization_max_yaw_jump == 0.10
     assert args.loaded_localization_recovery_samples == 11
     assert args.loaded_localization_recovery_timeout == 5.0
+    assert not args.loaded_localization_odom_recovery
+    assert args.loaded_localization_recovery_distance == 0.15
+    assert args.loaded_localization_recovery_speed == 0.03
     assert args.loaded_map_odom_freeze_lifecycle_timeout == 5.0
     assert args.loaded_shipping_max_linear_speed == 0.15
     assert args.loaded_shipping_max_angular_speed == 0.30
@@ -227,6 +230,28 @@ def test_shipping_jump_cancel_holds_zero_velocity():
     assert "navigator.cancelTask()" in shipping_source
     assert "_hold_zero_velocity(navigator, cmd_vel_topic)" in shipping_source
     assert "baseline_translation" in shipping_source
+
+
+def test_odom_recovery_is_explicit_and_baseline_frozen():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    mission_source = ast.get_source_segment(
+        source, _function(tree, "_navigate_to_shipping")
+    )
+    recovery_source = ast.get_source_segment(
+        source, _function(tree, "_run_odom_localization_recovery")
+    )
+    freeze_source = ast.get_source_segment(
+        source, _function(tree, "_freeze_map_to_odom")
+    )
+
+    assert "loaded_localization_odom_recovery" in source
+    assert "_run_odom_localization_recovery" in mission_source
+    assert "baseline_transform" in recovery_source
+    assert "captured_transform=monitor.baseline_transform" in recovery_source
+    assert "_bounded_reverse_by_odom" in recovery_source
+    assert "_restore_amcl_after_freeze" in recovery_source
+    assert "captured_transform=None" in freeze_source
 
 
 def test_loaded_localization_preflight_enforces_monotonic_sample_spacing():

@@ -372,6 +372,23 @@ def _parser() -> argparse.ArgumentParser:
         "--loaded-localization-recovery-timeout", type=float, default=5.0
     )
     parser.add_argument(
+        "--loaded-localization-odom-recovery",
+        action="store_true",
+        help=(
+            "Simulation-only: freeze the last trusted map->odom transform, "
+            "reverse once by odom, then restore AMCL before one retry."
+        ),
+    )
+    parser.add_argument(
+        "--loaded-localization-recovery-distance", type=float, default=0.15
+    )
+    parser.add_argument(
+        "--loaded-localization-recovery-speed", type=float, default=0.03
+    )
+    parser.add_argument(
+        "--loaded-localization-recovery-motion-timeout", type=float, default=10.0
+    )
+    parser.add_argument(
         "--loaded-map-odom-freeze-lifecycle-timeout",
         type=float,
         default=5.0,
@@ -825,6 +842,7 @@ class _LoadedLocalizationMonitor:
         )
         self.previous: Optional[tuple] = None
         self.baseline: Optional[tuple] = None
+        self.baseline_transform = None
         self.last_position_jump = 0.0
         self.last_yaw_jump = 0.0
         self.last_position_drift = 0.0
@@ -847,6 +865,7 @@ class _LoadedLocalizationMonitor:
         if self.previous is None:
             self.previous = current
             self.baseline = current
+            self.baseline_transform = transform
             return True
         self.last_position_jump = math.hypot(
             current[0] - self.previous[0],
@@ -997,23 +1016,25 @@ def _freeze_map_to_odom(
     odom_frame: str,
     lookup_timeout: float,
     lifecycle_timeout: float,
+    captured_transform=None,
 ) -> Optional[_FrozenMapOdom]:
     import tf2_ros
 
     buffer = tf2_ros.Buffer()
     listener = tf2_ros.TransformListener(buffer, navigator, spin_thread=False)
     deadline = time.monotonic() + lookup_timeout
-    captured = None
+    captured = captured_transform
     try:
-        while rclpy.ok() and time.monotonic() < deadline:
-            rclpy.spin_once(navigator, timeout_sec=0.05)
-            try:
-                captured = buffer.lookup_transform(
-                    map_frame, odom_frame, rclpy.time.Time()
-                )
-                break
-            except tf2_ros.TransformException:
-                continue
+        if captured is None:
+            while rclpy.ok() and time.monotonic() < deadline:
+                rclpy.spin_once(navigator, timeout_sec=0.05)
+                try:
+                    captured = buffer.lookup_transform(
+                        map_frame, odom_frame, rclpy.time.Time()
+                    )
+                    break
+                except tf2_ros.TransformException:
+                    continue
     finally:
         del listener
     if captured is None:
@@ -3236,6 +3257,60 @@ def _wait_for_localization_recovery(
     return False
 
 
+def _run_odom_localization_recovery(
+    navigator: BasicNavigator,
+    args: argparse.Namespace,
+    monitor: _LoadedLocalizationMonitor,
+) -> bool:
+    """Use one bounded odom retreat while the trusted map->odom is frozen."""
+    if monitor.baseline_transform is None:
+        navigator.get_logger().error(
+            "LOADED_ODOM_RECOVERY_REJECTED: trusted transform unavailable"
+        )
+        return False
+    frozen = _freeze_map_to_odom(
+        navigator,
+        args.frame_id,
+        args.odom_frame,
+        args.shipping_pose_lookup_timeout,
+        args.loaded_map_odom_freeze_lifecycle_timeout,
+        captured_transform=monitor.baseline_transform,
+    )
+    if frozen is None:
+        return False
+    recovery_ok = False
+    try:
+        if not _bounded_reverse_by_odom(
+            navigator,
+            args.cmd_vel_topic,
+            args.odom_frame,
+            args.base_frame,
+            args.loaded_localization_recovery_distance,
+            args.loaded_localization_recovery_speed,
+            args.loaded_localization_recovery_motion_timeout,
+            args.odom_lookup_timeout,
+            0.10,
+            0.10,
+            motion_name="localization recovery",
+        ):
+            return False
+        recovery_ok = True
+    finally:
+        frozen.stop()
+        if not _restore_amcl_after_freeze(
+            navigator,
+            frozen,
+            args.loaded_map_odom_freeze_lifecycle_timeout,
+        ):
+            recovery_ok = False
+    if recovery_ok:
+        navigator.get_logger().warning(
+            "LOADED_ODOM_RECOVERY_COMPLETE: bounded odom retreat finished; "
+            "AMCL restored for guarded replan"
+        )
+    return recovery_ok
+
+
 def _navigate_to_shipping(
     navigator: BasicNavigator,
     shipping_pose: PoseStamped,
@@ -3288,6 +3363,11 @@ def _navigate_to_shipping(
                 _hold_zero_velocity(navigator, cmd_vel_topic)
                 if (
                     not recovery_attempted
+                    and getattr(localization_monitor, "odom_recovery_enabled", False)
+                    and _run_odom_localization_recovery(
+                        navigator, localization_monitor.recovery_args,
+                        localization_monitor,
+                    )
                     and _wait_for_localization_recovery(
                         navigator,
                         localization_monitor,
@@ -3559,6 +3639,10 @@ def _run_integrated_mission(
             args.loaded_localization_max_position_jump,
             args.loaded_localization_max_yaw_jump,
         )
+        localization_monitor.odom_recovery_enabled = (
+            args.loaded_localization_odom_recovery
+        )
+        localization_monitor.recovery_args = args
         if not _wait_for_loaded_localization_stability(
             navigator,
             localization_monitor,
