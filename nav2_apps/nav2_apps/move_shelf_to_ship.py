@@ -836,6 +836,7 @@ class _LoadedLocalizationMonitor:
         self.max_position_jump = max_position_jump
         self.max_yaw_jump = max_yaw_jump
         self.enforce_jump_limits = enforce_jump_limits
+        self.enforce_baseline_limits = True
         self.buffer = tf2_ros.Buffer()
         self.listener = tf2_ros.TransformListener(
             self.buffer, navigator, spin_thread=False
@@ -891,7 +892,9 @@ class _LoadedLocalizationMonitor:
             self.last_position_drift <= self.max_position_jump
             and self.last_yaw_drift <= self.max_yaw_jump
         )
-        stable = step_stable and baseline_stable
+        stable = step_stable and (
+            baseline_stable or not self.enforce_baseline_limits
+        )
         self.previous = current
         if not stable and not self.enforce_jump_limits:
             self.navigator.get_logger().warning(
@@ -904,35 +907,9 @@ class _LoadedLocalizationMonitor:
             return True
         return stable
 
-    def sample_against_baseline(self) -> Optional[bool]:
-        """Read one sample for recovery without requiring step continuity."""
-        import tf2_ros
-
-        try:
-            transform = self.buffer.lookup_transform(
-                "map", self.odom_frame, rclpy.time.Time()
-            )
-        except tf2_ros.TransformException:
-            return None
-        current = (
-            transform.transform.translation.x,
-            transform.transform.translation.y,
-            _yaw_from_rotation(transform.transform.rotation),
-        )
-        if self.baseline is None:
-            self.baseline = current
-        self.last_position_drift = math.hypot(
-            current[0] - self.baseline[0],
-            current[1] - self.baseline[1],
-        )
-        self.last_yaw_drift = abs(
-            _normalize_angle(current[2] - self.baseline[2])
-        )
-        self.previous = current
-        return (
-            self.last_position_drift <= self.max_position_jump
-            and self.last_yaw_drift <= self.max_yaw_jump
-        )
+    def begin_motion_monitoring(self) -> None:
+        """Keep only per-sample jump checks once commanded motion begins."""
+        self.enforce_baseline_limits = False
 
 
 def _amcl_state(navigator: BasicNavigator, timeout: float) -> Optional[int]:
@@ -3244,7 +3221,7 @@ def _wait_for_localization_recovery(
     sample_interval: float,
     timeout: float,
 ) -> bool:
-    """Require a stable return to the accepted pre-jump baseline."""
+    """Require consecutive stable steps while the robot remains stopped."""
     if sample_count < 2 or sample_interval <= 0.0 or timeout <= 0.0:
         return False
     deadline = time.monotonic() + timeout
@@ -3255,7 +3232,7 @@ def _wait_for_localization_recovery(
         if now < next_sample_at:
             rclpy.spin_once(navigator, timeout_sec=min(0.1, next_sample_at - now))
             continue
-        stable = monitor.sample_against_baseline()
+        stable = monitor.sample()
         if stable is None:
             rclpy.spin_once(navigator, timeout_sec=0.05)
             continue
@@ -3265,13 +3242,13 @@ def _wait_for_localization_recovery(
             accepted += 1
             if accepted >= sample_count:
                 navigator.get_logger().info(
-                    "LOADED_LOCALIZATION_RECOVERED_TO_BASELINE: "
+                    "LOADED_LOCALIZATION_STOPPED_STABLE: "
                     f"samples={accepted}/{sample_count}"
                 )
                 return True
         next_sample_at = time.monotonic() + sample_interval
     navigator.get_logger().error(
-        "LOADED_LOCALIZATION_RECOVERY_FAILED: baseline did not stabilize"
+        "LOADED_LOCALIZATION_RECOVERY_FAILED: stopped samples did not stabilize"
     )
     return False
 
@@ -3670,6 +3647,7 @@ def _run_integrated_mission(
                 "DIRECT_NAV2_HANDOFF_BLOCKED_LOCALIZATION_UNSTABLE"
             )
             return ExitCode.UNKNOWN
+        localization_monitor.begin_motion_monitoring()
         navigator.get_logger().info(
             "DIRECT_NAV2_HANDOFF_AFTER_LIFT: loaded footprint verified; "
             "stopped map-to-odom stability gate passed; custom egress and "

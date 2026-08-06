@@ -203,7 +203,7 @@ def test_loaded_localization_monitor_reads_direct_map_to_odom_transform():
     assert "self.odom_frame, self.base_frame" not in monitor_source
 
 
-def test_loaded_localization_monitor_checks_cumulative_baseline_drift():
+def test_loaded_localization_monitor_disables_baseline_gate_during_motion():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     monitor = next(
@@ -217,7 +217,9 @@ def test_loaded_localization_monitor_checks_cumulative_baseline_drift():
     assert "self.baseline" in monitor_source
     assert "self.last_position_drift" in monitor_source
     assert "self.last_yaw_drift" in monitor_source
-    assert "step_stable and baseline_stable" in monitor_source
+    assert "self.enforce_baseline_limits" in monitor_source
+    assert "def begin_motion_monitoring" in monitor_source
+    assert "self.enforce_baseline_limits = False" in monitor_source
 
 
 def test_shipping_jump_cancel_holds_zero_velocity():
@@ -263,6 +265,16 @@ def test_localization_recovery_is_stationary_not_odom_motion():
     assert "_hold_zero_velocity(navigator, cmd_vel_topic)" in shipping_source
     assert "LOADED_LOCALIZATION_STOP_RECOVERY_REPLAN" in shipping_source
     assert "_bounded_reverse_by_odom" not in shipping_source
+
+
+def test_default_handoff_switches_to_step_only_motion_monitoring():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    mission_source = ast.get_source_segment(
+        source, _function(tree, "_run_integrated_mission")
+    )
+    assert "localization_monitor.begin_motion_monitoring()" in mission_source
+    assert "LOADED_LOCALIZATION_STOPPED_STABLE" in source
 
 
 def test_restore_amcl_accepts_already_active_lifecycle_state():
