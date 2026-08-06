@@ -23,7 +23,10 @@ shelf_detection_server:
     forward_step_distance: 0.15
     center_distance_tolerance: 0.20
     center_lateral_tolerance: 0.08
-    center_lock_distance: 0.35
+    # Match the simulation's bounded close-range recovery: after the last
+    # fresh cart_frame, use the measured remaining distance only when the
+    # estimate is inside this finite window.
+    center_lock_distance: 0.60
     center_lock_min_steps: 2
     center_drive_scale: 1.0
     entry_odom_yaw_tolerance: 0.04
