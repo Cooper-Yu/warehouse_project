@@ -9,6 +9,7 @@ install(DIRECTORY launch config rviz
 
 install(PROGRAMS
   tools/clear_map_polygon.py
+  tools/generate_current_sim_keepout_mask.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
