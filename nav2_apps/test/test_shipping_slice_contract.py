@@ -322,6 +322,8 @@ def test_shipping_localization_jump_cancels_before_completion(monkeypatch):
     class Monitor:
         last_position_jump = 0.42
         last_yaw_jump = 0.31
+        last_position_drift = 0.45
+        last_yaw_drift = 0.33
 
         def sample(self):
             return False
@@ -336,6 +338,12 @@ def test_shipping_localization_jump_cancels_before_completion(monkeypatch):
         move_shelf_to_ship.time,
         "monotonic",
         iter([100.0, 100.1]).__next__,
+    )
+    zero_holds = []
+    monkeypatch.setattr(
+        move_shelf_to_ship,
+        "_hold_zero_velocity",
+        lambda _navigator, topic: zero_holds.append(topic),
     )
 
     result = move_shelf_to_ship._navigate_to_shipping(
@@ -354,6 +362,7 @@ def test_shipping_localization_jump_cancels_before_completion(monkeypatch):
 
     assert result == ExitCode.CANCELED
     assert navigator.cancelled
+    assert zero_holds == ["/cmd_vel"]
     assert any(
         "localization jump" in message
         and "translation=0.420" in message

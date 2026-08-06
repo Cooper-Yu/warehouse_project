@@ -92,9 +92,10 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_prealign_path_end_tolerance == 0.55
     assert args.loaded_prealign_path_handoff_max_bearing == 0.60
     assert args.loaded_prealign_planner_id == "GridBased"
-    assert args.loaded_localization_samples == 5
-    assert args.loaded_localization_max_position_jump == 0.20
-    assert args.loaded_localization_max_yaw_jump == 0.20
+    assert args.loaded_localization_samples == 21
+    assert args.loaded_localization_sample_interval == 0.20
+    assert args.loaded_localization_max_position_jump == 0.10
+    assert args.loaded_localization_max_yaw_jump == 0.10
     assert args.loaded_map_odom_freeze_lifecycle_timeout == 5.0
     assert args.loaded_shipping_max_linear_speed == 0.15
     assert args.loaded_shipping_max_angular_speed == 0.30
@@ -144,7 +145,7 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
     assert "DIRECT_NAV2_HANDOFF_AFTER_LIFT" in mission_source
 
 
-def test_default_integrated_route_skips_custom_loaded_handoff_gates():
+def test_default_integrated_route_uses_only_localization_safety_gate():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     mission_source = ast.get_source_segment(
@@ -156,7 +157,10 @@ def test_default_integrated_route_skips_custom_loaded_handoff_gates():
 
     assert "_navigate_to_shipping" in default_branch
     assert "_loaded_egress_before_shipping" not in default_branch
-    assert "_wait_for_loaded_localization_stability" not in default_branch
+    assert "_LoadedLocalizationMonitor" in default_branch
+    assert "_wait_for_loaded_localization_stability" in default_branch
+    assert "localization_monitor" in default_branch
+    assert "_hold_zero_velocity" in default_branch
     assert "_wait_for_loaded_handoff_clearance" not in default_branch
     assert "_prealign_loaded_shipping_bearing" not in default_branch
     assert "_bounded_loaded_prehandoff_rotation" not in default_branch
@@ -192,6 +196,35 @@ def test_loaded_localization_monitor_reads_direct_map_to_odom_transform():
     assert '"map", self.odom_frame' in monitor_source
     assert '"map", self.base_frame' not in monitor_source
     assert "self.odom_frame, self.base_frame" not in monitor_source
+
+
+def test_loaded_localization_monitor_checks_cumulative_baseline_drift():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    monitor = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and node.name == "_LoadedLocalizationMonitor"
+    )
+    monitor_source = ast.get_source_segment(source, monitor)
+
+    assert "self.baseline" in monitor_source
+    assert "self.last_position_drift" in monitor_source
+    assert "self.last_yaw_drift" in monitor_source
+    assert "step_stable and baseline_stable" in monitor_source
+
+
+def test_shipping_jump_cancel_holds_zero_velocity():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    shipping_source = ast.get_source_segment(
+        source, _function(tree, "_navigate_to_shipping")
+    )
+
+    assert "navigator.cancelTask()" in shipping_source
+    assert "_hold_zero_velocity(navigator, cmd_vel_topic)" in shipping_source
+    assert "baseline_translation" in shipping_source
 
 
 def test_loaded_localization_preflight_enforces_monotonic_sample_spacing():

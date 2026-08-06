@@ -354,16 +354,16 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--loaded-localization-samples", type=int, default=5
+        "--loaded-localization-samples", type=int, default=21
     )
     parser.add_argument(
         "--loaded-localization-sample-interval", type=float, default=0.20
     )
     parser.add_argument(
-        "--loaded-localization-max-position-jump", type=float, default=0.20
+        "--loaded-localization-max-position-jump", type=float, default=0.10
     )
     parser.add_argument(
-        "--loaded-localization-max-yaw-jump", type=float, default=0.20
+        "--loaded-localization-max-yaw-jump", type=float, default=0.10
     )
     parser.add_argument(
         "--loaded-map-odom-freeze-lifecycle-timeout",
@@ -794,7 +794,7 @@ def localization_step_is_stable(
 
 
 class _LoadedLocalizationMonitor:
-    """Track direct map-to-odom continuity with one shared TF buffer."""
+    """Track direct map-to-odom continuity and cumulative baseline drift."""
 
     def __init__(
         self,
@@ -818,8 +818,11 @@ class _LoadedLocalizationMonitor:
             self.buffer, navigator, spin_thread=False
         )
         self.previous: Optional[tuple] = None
+        self.baseline: Optional[tuple] = None
         self.last_position_jump = 0.0
         self.last_yaw_jump = 0.0
+        self.last_position_drift = 0.0
+        self.last_yaw_drift = 0.0
 
     def sample(self) -> Optional[bool]:
         import tf2_ros
@@ -837,6 +840,7 @@ class _LoadedLocalizationMonitor:
         )
         if self.previous is None:
             self.previous = current
+            self.baseline = current
             return True
         self.last_position_jump = math.hypot(
             current[0] - self.previous[0],
@@ -845,18 +849,32 @@ class _LoadedLocalizationMonitor:
         self.last_yaw_jump = abs(
             _normalize_angle(current[2] - self.previous[2])
         )
-        stable = localization_step_is_stable(
+        step_stable = localization_step_is_stable(
             self.previous,
             current,
             self.max_position_jump,
             self.max_yaw_jump,
         )
+        self.last_position_drift = math.hypot(
+            current[0] - self.baseline[0],
+            current[1] - self.baseline[1],
+        )
+        self.last_yaw_drift = abs(
+            _normalize_angle(current[2] - self.baseline[2])
+        )
+        baseline_stable = (
+            self.last_position_drift <= self.max_position_jump
+            and self.last_yaw_drift <= self.max_yaw_jump
+        )
+        stable = step_stable and baseline_stable
         self.previous = current
         if not stable and not self.enforce_jump_limits:
             self.navigator.get_logger().warning(
                 "LOADED_LOCALIZATION_JUMP_OBSERVED_NOT_ENFORCED: "
                 f"translation={self.last_position_jump:.3f} "
-                f"yaw={self.last_yaw_jump:.3f}"
+                f"yaw={self.last_yaw_jump:.3f} "
+                f"baseline_translation={self.last_position_drift:.3f} "
+                f"baseline_yaw={self.last_yaw_drift:.3f}"
             )
             return True
         return stable
@@ -1035,7 +1053,9 @@ def _wait_for_loaded_localization_stability(
             navigator.get_logger().error(
                 "loaded localization gate rejected: map-to-odom jump "
                 f"translation={monitor.last_position_jump:.3f} "
-                f"yaw={monitor.last_yaw_jump:.3f}"
+                f"yaw={monitor.last_yaw_jump:.3f} "
+                f"baseline_translation={monitor.last_position_drift:.3f} "
+                f"baseline_yaw={monitor.last_yaw_drift:.3f}"
             )
             return False
         accepted += 1
@@ -3121,6 +3141,26 @@ def _apply_unloaded_footprint_verified(
     return True
 
 
+def _hold_zero_velocity(
+    navigator: BasicNavigator,
+    cmd_vel_topic: str,
+    hold_seconds: float = 1.0,
+) -> None:
+    """Publish zero velocity through the bounded cancellation settle window."""
+    publisher = navigator.create_publisher(Twist, cmd_vel_topic, 10)
+    deadline = time.monotonic() + max(0.0, hold_seconds)
+    stop = Twist()
+    try:
+        while rclpy.ok() and time.monotonic() < deadline:
+            publisher.publish(stop)
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+    finally:
+        for _ in range(3):
+            publisher.publish(stop)
+            time.sleep(0.05)
+        navigator.destroy_publisher(publisher)
+
+
 def _navigate_to_shipping(
     navigator: BasicNavigator,
     shipping_pose: PoseStamped,
@@ -3135,6 +3175,7 @@ def _navigate_to_shipping(
     correction_ratio: float = 0.5,
     max_correction_rounds: int = 3,
     localization_monitor: Optional[_LoadedLocalizationMonitor] = None,
+    cmd_vel_topic: str = "/cmd_vel",
 ) -> ExitCode:
     """Navigate once to shipping and expose a bounded terminal result."""
     if timeout <= 0.0:
@@ -3162,11 +3203,16 @@ def _navigate_to_shipping(
             localization_stable = localization_monitor.sample()
             if localization_stable is False:
                 navigator.cancelTask()
+                _hold_zero_velocity(navigator, cmd_vel_topic)
                 navigator.get_logger().error(
                     "shipping canceled: loaded localization jump detected "
                     f"translation="
                     f"{localization_monitor.last_position_jump:.3f} "
-                    f"yaw={localization_monitor.last_yaw_jump:.3f}"
+                    f"yaw={localization_monitor.last_yaw_jump:.3f} "
+                    f"baseline_translation="
+                    f"{localization_monitor.last_position_drift:.3f} "
+                    f"baseline_yaw="
+                    f"{localization_monitor.last_yaw_drift:.3f}"
                 )
                 return ExitCode.CANCELED
 
@@ -3394,9 +3440,29 @@ def _run_integrated_mission(
         args.shipping_yaw,
     )
     if not args.loaded_egress_extreme_left_90_experiment:
+        localization_monitor = _LoadedLocalizationMonitor(
+            navigator,
+            args.odom_frame,
+            args.base_frame,
+            args.loaded_localization_max_position_jump,
+            args.loaded_localization_max_yaw_jump,
+        )
+        if not _wait_for_loaded_localization_stability(
+            navigator,
+            localization_monitor,
+            args.loaded_localization_samples,
+            args.loaded_localization_sample_interval,
+            args.shipping_pose_lookup_timeout,
+        ):
+            _hold_zero_velocity(navigator, args.cmd_vel_topic)
+            navigator.get_logger().error(
+                "DIRECT_NAV2_HANDOFF_BLOCKED_LOCALIZATION_UNSTABLE"
+            )
+            return ExitCode.UNKNOWN
         navigator.get_logger().info(
             "DIRECT_NAV2_HANDOFF_AFTER_LIFT: loaded footprint verified; "
-            "custom egress, prealignment, and localization jump gate skipped"
+            "stopped map-to-odom stability gate passed; custom egress and "
+            "prealignment skipped"
         )
         shipping_result = _navigate_to_shipping(
             navigator,
@@ -3411,6 +3477,8 @@ def _run_integrated_mission(
             args.shipping_pose_lookup_timeout,
             args.shipping_yaw_correction_ratio,
             args.shipping_yaw_correction_rounds,
+            localization_monitor,
+            args.cmd_vel_topic,
         )
     else:
         navigator.get_logger().warning(
