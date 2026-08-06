@@ -246,12 +246,35 @@ def test_odom_recovery_is_explicit_and_baseline_frozen():
     )
 
     assert "loaded_localization_odom_recovery" in source
-    assert "_run_odom_localization_recovery" in mission_source
+    assert "_run_odom_localization_recovery" not in mission_source
     assert "baseline_transform" in recovery_source
     assert "captured_transform=monitor.baseline_transform" in recovery_source
     assert "_bounded_reverse_by_odom" in recovery_source
     assert "_restore_amcl_after_freeze" in recovery_source
     assert "captured_transform=None" in freeze_source
+
+
+def test_localization_recovery_is_stationary_not_odom_motion():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    shipping_source = ast.get_source_segment(
+        source, _function(tree, "_navigate_to_shipping")
+    )
+    assert "_hold_zero_velocity(navigator, cmd_vel_topic)" in shipping_source
+    assert "LOADED_LOCALIZATION_STOP_RECOVERY_REPLAN" in shipping_source
+    assert "_bounded_reverse_by_odom" not in shipping_source
+
+
+def test_restore_amcl_accepts_already_active_lifecycle_state():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    restore_source = ast.get_source_segment(
+        source, _function(tree, "_restore_amcl_after_freeze")
+    )
+
+    assert "state = _amcl_state" in restore_source
+    assert "state == State.PRIMARY_STATE_ACTIVE" in restore_source
+    assert "state == State.PRIMARY_STATE_INACTIVE" in restore_source
 
 
 def test_loaded_localization_preflight_enforces_monotonic_sample_spacing():

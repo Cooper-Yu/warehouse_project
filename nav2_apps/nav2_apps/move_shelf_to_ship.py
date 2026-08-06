@@ -3381,11 +3381,6 @@ def _navigate_to_shipping(
                 _hold_zero_velocity(navigator, cmd_vel_topic)
                 if (
                     not recovery_attempted
-                    and getattr(localization_monitor, "odom_recovery_enabled", False)
-                    and _run_odom_localization_recovery(
-                        navigator, localization_monitor.recovery_args,
-                        localization_monitor,
-                    )
                     and _wait_for_localization_recovery(
                         navigator,
                         localization_monitor,
@@ -3407,8 +3402,9 @@ def _navigate_to_shipping(
                 ):
                     recovery_attempted = True
                     navigator.get_logger().warning(
-                        "LOADED_LOCALIZATION_RECOVERY_REPLAN: one bounded "
-                        "shipping retry authorized"
+                        "LOADED_LOCALIZATION_STOP_RECOVERY_REPLAN: robot "
+                        "held at zero velocity; one bounded shipping retry "
+                        "authorized"
                     )
                     if not navigator.goToPose(shipping_pose):
                         return ExitCode.GOAL_REJECTED
@@ -3657,10 +3653,11 @@ def _run_integrated_mission(
             args.loaded_localization_max_position_jump,
             args.loaded_localization_max_yaw_jump,
         )
-        localization_monitor.odom_recovery_enabled = (
-            args.loaded_localization_odom_recovery
-        )
-        localization_monitor.recovery_args = args
+        if args.loaded_localization_odom_recovery:
+            navigator.get_logger().warning(
+                "LOADED_ODOM_RECOVERY_DISABLED: using stationary recovery "
+                "instead of frozen map-to-odom and odom retreat"
+            )
         if not _wait_for_loaded_localization_stability(
             navigator,
             localization_monitor,
