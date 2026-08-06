@@ -150,7 +150,7 @@ def test_integrated_route_contains_complete_fail_closed_sequence():
     assert "DIRECT_NAV2_HANDOFF_AFTER_LIFT" in mission_source
 
 
-def test_default_integrated_route_uses_bounded_rotation_and_localization_gate():
+def test_default_integrated_route_uses_loaded_speed_limit_and_localization_gate():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     mission_source = ast.get_source_segment(
@@ -168,17 +168,44 @@ def test_default_integrated_route_uses_bounded_rotation_and_localization_gate():
     assert "_hold_zero_velocity" in default_branch
     assert "_wait_for_loaded_handoff_clearance" not in default_branch
     assert "_prealign_loaded_shipping_bearing" not in default_branch
-    assert "_bounded_loaded_prehandoff_rotation" in default_branch
-    assert "_controller_speed_snapshot" not in default_branch
-    assert "_set_controller_speeds" not in default_branch
+    assert "_bounded_loaded_prehandoff_rotation" not in default_branch
+    assert "_controller_speed_snapshot" in default_branch
+    assert default_branch.count("_set_controller_speeds") == 2
+    assert default_branch.count("_controller_speeds_match") == 2
+    assert '"FollowPath.max_vel_x"' in default_branch
+    assert '"FollowPath.max_speed_xy"' in default_branch
+    assert '"FollowPath.max_vel_theta"' in default_branch
+    assert "LOADED_CONTROLLER_SPEED_LIMIT_APPLIED" in default_branch
+    assert "LOADED_CONTROLLER_SPEED_RESTORED" in default_branch
+    assert "finally:" in default_branch
     begin_index = default_branch.index(
         "localization_monitor.begin_motion_monitoring()"
     )
-    rotation_index = default_branch.index(
-        "_bounded_loaded_prehandoff_rotation"
-    )
+    snapshot_index = default_branch.index("_controller_speed_snapshot")
+    apply_index = default_branch.index("_set_controller_speeds")
     navigation_index = default_branch.index("_navigate_to_shipping")
-    assert begin_index < rotation_index < navigation_index
+    restore_index = default_branch.rindex("_set_controller_speeds")
+    assert begin_index < snapshot_index < apply_index < navigation_index
+    assert navigation_index < restore_index
+
+
+def test_controller_speed_match_requires_all_values_within_tolerance():
+    expected = {
+        "FollowPath.max_vel_x": 0.15,
+        "FollowPath.max_speed_xy": 0.15,
+        "FollowPath.max_vel_theta": 0.30,
+    }
+
+    assert move_shelf_to_ship._controller_speeds_match(
+        dict(expected), expected
+    )
+    assert not move_shelf_to_ship._controller_speeds_match(None, expected)
+    assert not move_shelf_to_ship._controller_speeds_match(
+        {"FollowPath.max_vel_x": 0.15}, expected
+    )
+    changed = dict(expected)
+    changed["FollowPath.max_vel_theta"] = 0.31
+    assert not move_shelf_to_ship._controller_speeds_match(changed, expected)
 
 
 def test_localization_step_rejects_translation_and_yaw_jumps():

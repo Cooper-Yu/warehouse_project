@@ -1317,6 +1317,15 @@ def _set_controller_speeds(
     )
 
 
+def _controller_speeds_match(
+    actual: Optional[dict], expected: dict, tolerance: float = 1e-6
+) -> bool:
+    return actual is not None and all(
+        name in actual and abs(actual[name] - value) <= tolerance
+        for name, value in expected.items()
+    )
+
+
 def _accept_or_align_shipping_pose(
     navigator: BasicNavigator,
     shipping_pose: PoseStamped,
@@ -3648,44 +3657,90 @@ def _run_integrated_mission(
             )
             return ExitCode.UNKNOWN
         localization_monitor.begin_motion_monitoring()
-        if not _bounded_loaded_prehandoff_rotation(
+        controller_speeds = _controller_speed_snapshot(
+            navigator, args.loaded_handoff_costmap_timeout
+        )
+        if controller_speeds is None:
+            _hold_zero_velocity(navigator, args.cmd_vel_topic)
+            navigator.get_logger().error(
+                "LOADED_CONTROLLER_SPEED_LIMIT_UNCERTAIN: snapshot failed"
+            )
+            return ExitCode.UNKNOWN
+        loaded_speeds = {
+            "FollowPath.max_vel_x": args.loaded_shipping_max_linear_speed,
+            "FollowPath.max_speed_xy": args.loaded_shipping_max_linear_speed,
+            "FollowPath.max_vel_theta": args.loaded_shipping_max_angular_speed,
+        }
+        if not _set_controller_speeds(
             navigator,
-            args,
-            shipping_pose,
-            localization_monitor,
+            loaded_speeds,
+            args.loaded_handoff_costmap_timeout,
+        ) or not _controller_speeds_match(
+            _controller_speed_snapshot(
+                navigator, args.loaded_handoff_costmap_timeout
+            ),
+            loaded_speeds,
         ):
             _hold_zero_velocity(navigator, args.cmd_vel_topic)
             navigator.get_logger().error(
-                "DIRECT_NAV2_HANDOFF_BLOCKED_PREHANDOFF_ROTATION"
+                "LOADED_CONTROLLER_SPEED_LIMIT_UNCERTAIN: apply failed"
             )
             return ExitCode.UNKNOWN
         navigator.get_logger().info(
+            "LOADED_CONTROLLER_SPEED_LIMIT_APPLIED: "
+            f"linear={args.loaded_shipping_max_linear_speed:.3f} "
+            f"angular={args.loaded_shipping_max_angular_speed:.3f}"
+        )
+        navigator.get_logger().info(
             "DIRECT_NAV2_HANDOFF_AFTER_LIFT: loaded footprint verified; "
-            "stopped map-to-odom stability gate and bounded path-bearing "
-            "rotation passed; custom egress skipped"
+            "stopped map-to-odom stability gate passed; loaded controller "
+            "speed limit applied; custom egress and prealignment skipped"
         )
-        shipping_result = _navigate_to_shipping(
-            navigator,
-            shipping_pose,
-            args.shipping_timeout,
-            args.base_frame,
-            args.shipping_position_tolerance,
-            args.shipping_yaw_tolerance,
-            args.shipping_max_yaw_correction,
-            args.shipping_alignment_timeout,
-            args.shipping_alignment_settle,
-            args.shipping_pose_lookup_timeout,
-            args.shipping_yaw_correction_ratio,
-            args.shipping_yaw_correction_rounds,
-            localization_monitor,
-            args.cmd_vel_topic,
-            args.loaded_localization_recovery_samples,
-            args.loaded_localization_sample_interval,
-            args.loaded_localization_recovery_timeout,
-            args.loaded_prealign_planner_id,
-            args.loaded_prealign_path_probe_timeout,
-            args.loaded_prealign_path_end_tolerance,
-        )
+        controller_restore_ok = False
+        try:
+            shipping_result = _navigate_to_shipping(
+                navigator,
+                shipping_pose,
+                args.shipping_timeout,
+                args.base_frame,
+                args.shipping_position_tolerance,
+                args.shipping_yaw_tolerance,
+                args.shipping_max_yaw_correction,
+                args.shipping_alignment_timeout,
+                args.shipping_alignment_settle,
+                args.shipping_pose_lookup_timeout,
+                args.shipping_yaw_correction_ratio,
+                args.shipping_yaw_correction_rounds,
+                localization_monitor,
+                args.cmd_vel_topic,
+                args.loaded_localization_recovery_samples,
+                args.loaded_localization_sample_interval,
+                args.loaded_localization_recovery_timeout,
+                args.loaded_prealign_planner_id,
+                args.loaded_prealign_path_probe_timeout,
+                args.loaded_prealign_path_end_tolerance,
+            )
+        finally:
+            _hold_zero_velocity(navigator, args.cmd_vel_topic)
+            controller_restore_ok = (
+                _set_controller_speeds(
+                    navigator,
+                    controller_speeds,
+                    args.loaded_handoff_costmap_timeout,
+                )
+                and _controller_speeds_match(
+                    _controller_speed_snapshot(
+                        navigator, args.loaded_handoff_costmap_timeout
+                    ),
+                    controller_speeds,
+                )
+            )
+        if not controller_restore_ok:
+            navigator.get_logger().error(
+                "LOADED_CONTROLLER_SPEED_RESTORE_FAILED"
+            )
+            return ExitCode.UNKNOWN
+        navigator.get_logger().info("LOADED_CONTROLLER_SPEED_RESTORED")
     else:
         navigator.get_logger().warning(
             "EXTREME_LOADED_EGRESS_DIAGNOSTIC_SELECTED: default direct "
