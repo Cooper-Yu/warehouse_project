@@ -995,6 +995,7 @@ class _FrozenMapOdom:
         self.transform = transform
         self.broadcaster = TransformBroadcaster(navigator)
         self.timer = navigator.create_timer(publish_period, self.publish)
+        self.stopped = False
         self.publish()
 
     def publish(self) -> None:
@@ -1006,8 +1007,17 @@ class _FrozenMapOdom:
         self.broadcaster.sendTransform(message)
 
     def stop(self) -> None:
-        self.timer.cancel()
-        self.navigator.destroy_timer(self.timer)
+        if self.stopped:
+            return
+        self.stopped = True
+        try:
+            self.timer.cancel()
+        except (RuntimeError, AttributeError):
+            pass
+        try:
+            self.navigator.destroy_timer(self.timer)
+        except (RuntimeError, AttributeError):
+            pass
 
 
 def _freeze_map_to_odom(
@@ -3296,7 +3306,6 @@ def _run_odom_localization_recovery(
             return False
         recovery_ok = True
     finally:
-        frozen.stop()
         if not _restore_amcl_after_freeze(
             navigator,
             frozen,
