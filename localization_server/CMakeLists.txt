@@ -9,6 +9,7 @@ install(DIRECTORY launch config rviz
 
 install(PROGRAMS
   scripts/auto_initial_pose.py
+  scripts/loaded_scan_filter.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

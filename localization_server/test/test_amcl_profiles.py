@@ -15,6 +15,7 @@ def _parameters(filename):
 def test_simulation_amcl_uses_probabilistic_beam_skipping():
     params = _parameters("amcl_config_sim.yaml")
 
+    assert params["scan_topic"] == "/scan_localization"
     assert params["laser_model_type"] == "likelihood_field_prob"
     assert params["do_beamskip"] is True
     assert params["beam_skip_distance"] == 0.5
@@ -25,5 +26,6 @@ def test_simulation_amcl_uses_probabilistic_beam_skipping():
 def test_real_amcl_profile_is_not_switched_to_beam_skipping():
     params = _parameters("amcl_config_real.yaml")
 
+    assert params["scan_topic"] == "/scan"
     assert params["laser_model_type"] == "likelihood_field"
     assert params["do_beamskip"] is False
