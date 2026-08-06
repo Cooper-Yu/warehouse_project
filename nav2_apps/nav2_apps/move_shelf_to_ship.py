@@ -458,7 +458,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--shipping-refine-timeout", type=float, default=15.0)
     parser.add_argument("--cmd-vel-topic", default="/cmd_vel")
     parser.add_argument("--odom-frame", default="odom")
-    parser.add_argument("--exit-distance", type=float, default=0.75)
+    parser.add_argument("--exit-distance", type=float, default=1.0)
     parser.add_argument("--exit-speed", type=float, default=0.05)
     parser.add_argument("--exit-timeout", type=float, default=40.0)
     parser.add_argument(
@@ -3554,33 +3554,6 @@ def _exit_restore_integrated(
             "shelf clearance is unavailable; loaded footprint retained"
         )
         return False
-    if not _clearance_passes(transform, args.clearance_x):
-        navigator.get_logger().warning(
-            "main exit clearance is below the acceptance threshold; "
-            "running one bounded clearance refinement"
-        )
-        if not _bounded_reverse_by_odom(
-            navigator,
-            args.cmd_vel_topic,
-            args.odom_frame,
-            args.base_frame,
-            args.clearance_refine_distance,
-            args.clearance_refine_speed,
-            args.clearance_refine_motion_timeout,
-            args.odom_lookup_timeout,
-            args.exit_heading_tolerance,
-            args.exit_lateral_tolerance,
-        ):
-            return False
-        if not _settle_without_motion(navigator, args.exit_settle):
-            return False
-        transform = _request_shelf_transform(
-            navigator,
-            args.shelf_service,
-            args.cart_frame,
-            args.base_frame,
-            args.clearance_timeout,
-        )
     if not _clearance_passes(transform, args.clearance_x):
         observed = (
             "unavailable"

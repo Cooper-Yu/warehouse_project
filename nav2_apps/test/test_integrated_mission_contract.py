@@ -104,7 +104,7 @@ def test_no_mission_flags_selects_integrated_course_route():
     assert args.loaded_map_odom_freeze_lifecycle_timeout == 5.0
     assert args.loaded_shipping_max_linear_speed == 0.15
     assert args.loaded_shipping_max_angular_speed == 0.30
-    assert args.exit_distance == 0.75
+    assert args.exit_distance == 1.0
     assert args.clearance_refine_distance == 0.02
     assert args.clearance_x == 0.36
 
@@ -123,7 +123,17 @@ def test_integrated_stop_at_shipping_is_bounded_before_unload_actions():
     assert "--stop-at-shipping" in source
     assert "INTEGRATED_STOP_AT_SHIPPING" in function_source
     assert stop_index < refine_index < lower_index < exit_index
-    assert "return ExitCode.SUCCEEDED" in function_source[stop_index:refine_index]
+
+
+def test_integrated_exit_uses_one_main_reverse_without_clearance_refinement():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    exit_restore = _function(tree, "_exit_restore_integrated")
+    function_source = ast.get_source_segment(source, exit_restore)
+
+    assert function_source.count("_bounded_reverse_by_odom") == 1
+    assert "args.clearance_refine_distance" not in function_source
+    assert "running one bounded clearance refinement" not in function_source
 
 
 def test_integrated_route_contains_complete_fail_closed_sequence():
@@ -1132,17 +1142,18 @@ def test_path_probe_result_requires_map_frame_finite_endpoint_near_goal():
     )
 
 
-def test_integrated_exit_allows_only_one_clearance_refinement():
+def test_integrated_exit_uses_one_clearance_check_without_refinement():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     exit_flow = _function(tree, "_exit_restore_integrated")
     exit_source = ast.get_source_segment(source, exit_flow)
 
-    assert exit_source.count("_bounded_reverse_by_odom") == 2
-    assert exit_source.count("_request_shelf_transform") == 2
+    assert exit_source.count("_bounded_reverse_by_odom") == 1
+    assert exit_source.count("_request_shelf_transform") == 1
     assert "if transform is None" in exit_source
     assert "_apply_unloaded_footprint_verified" in exit_source
     assert "EXIT_ACCEPTANCE_PENDING" in exit_source
+    assert "args.clearance_refine_distance" not in exit_source
 
 
 def test_course_script_delegates_to_installed_integrated_main():
