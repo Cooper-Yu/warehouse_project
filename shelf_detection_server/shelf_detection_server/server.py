@@ -220,6 +220,9 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("entry_reverse_recovery_limit", 2)
         self.declare_parameter("entry_reverse_recovery_distance", 0.08)
         self.declare_parameter("entry_lateral_realign_limit", 3)
+        self.declare_parameter("entry_final_standoff", 0.15)
+        self.declare_parameter("entry_blind_step_distance", 0.15)
+        self.declare_parameter("entry_blind_max_distance", 0.80)
         # Positive target means the shelf midpoint remains to the robot's
         # left, placing the robot slightly right of geometric center.
         self.declare_parameter("lateral_target_offset", 0.0)
@@ -872,39 +875,57 @@ class ShelfDetectionServer(Node):
                 scan_before_motion, deadline
             )
             if target is None:
-                estimated_remaining = max(x - drive_distance, 0.0)
-                if c9_center_lock_enabled(
-                    step,
-                    estimated_remaining,
-                    center_lock_min_steps,
-                    center_lock_distance,
-                ):
-                    locked_distance = c9_locked_drive_distance(
-                        estimated_remaining,
-                        float(
-                            self.get_parameter("center_drive_scale").value
-                        ),
+                final_standoff = max(
+                    0.0,
+                    float(self.get_parameter("entry_final_standoff").value),
+                )
+                blind_step = max(
+                    0.01,
+                    float(
+                        self.get_parameter("entry_blind_step_distance").value
+                    ),
+                )
+                blind_max = max(
+                    0.0,
+                    float(
+                        self.get_parameter("entry_blind_max_distance").value
+                    ),
+                )
+                estimated_remaining = max(x - drive_distance - final_standoff, 0.0)
+                blind_remaining = min(estimated_remaining, blind_max)
+                self.get_logger().warning(
+                    "close-range detection recovery exhausted; "
+                    "using bounded segmented entry: "
+                    f"previous_x={x:.3f} last_drive={drive_distance:.3f} "
+                    f"final_standoff={final_standoff:.3f} "
+                    f"estimated_remaining={estimated_remaining:.3f}"
+                )
+                while blind_remaining > 0.0:
+                    segment = min(blind_step, blind_remaining)
+                    self.get_logger().info(
+                        f"blind entry segment: distance={segment:.3f} "
+                        f"remaining={blind_remaining:.3f}"
                     )
-                    self.get_logger().warning(
-                        "close-range detection recovery exhausted; "
-                        "locking from estimated remaining distance: "
-                        f"previous_x={x:.3f} "
-                        f"last_drive={drive_distance:.3f} "
-                        f"estimated_remaining={estimated_remaining:.3f} "
-                        f"locked_distance={locked_distance:.3f}"
-                    )
-                    if locked_distance > 0.0 and not (
-                        self._drive_forward_measured(
-                            locked_distance, deadline
-                        )
-                    ):
+                    if not self._drive_forward_measured(segment, deadline):
                         return False
                     if not self._accepted_odom_heading_ok(
                         accepted_odom_yaw, deadline
                     ):
                         return False
+                    blind_remaining -= segment
+                    recovered = self._recover_cart_frame_after_motion(
+                        self._current_scan_sequence(), deadline
+                    )
+                    if recovered is not None:
+                        target = recovered
+                        break
+                else:
                     center_approach_complete = True
                     break
+                if center_approach_complete:
+                    break
+                step += 1
+                continue
                 self.get_logger().error(
                     "attach stopped: cart_frame recovery exhausted after "
                     "bounded step"
