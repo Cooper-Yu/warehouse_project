@@ -219,6 +219,7 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("entry_heading_recovery_yaw", 0.12)
         self.declare_parameter("entry_reverse_recovery_limit", 2)
         self.declare_parameter("entry_reverse_recovery_distance", 0.08)
+        self.declare_parameter("entry_lateral_realign_limit", 3)
         # Positive target means the shelf midpoint remains to the robot's
         # left, placing the robot slightly right of geometric center.
         self.declare_parameter("lateral_target_offset", 0.0)
@@ -701,6 +702,7 @@ class ShelfDetectionServer(Node):
         step = 0
         heading_recoveries = 0
         reverse_recoveries = 0
+        lateral_realigns = 0
         center_approach_complete = False
         while rclpy.ok() and time.monotonic() < deadline:
             frame_id, x, y, shelf_heading = target
@@ -789,11 +791,28 @@ class ShelfDetectionServer(Node):
                     if target is None:
                         return False
                     continue
-                self.get_logger().error(
-                    "attach stopped: midpoint left the centered corridor; "
-                    f"y={y:.3f} tolerance={center_y:.3f}"
+                realign_limit = int(
+                    self.get_parameter("entry_lateral_realign_limit").value
                 )
-                return False
+                if lateral_realigns >= realign_limit:
+                    self.get_logger().error(
+                        "attach stopped: lateral realignment limit exhausted; "
+                        f"y={y:.3f} tolerance={center_y:.3f}"
+                    )
+                    return False
+                lateral_realigns += 1
+                self.get_logger().warning(
+                    "entry lateral realignment: "
+                    f"attempt={lateral_realigns}/{realign_limit} "
+                    f"x={x:.3f} y={y:.3f}"
+                )
+                realignment = self._align_at_safe_standoff(
+                    target, deadline
+                )
+                if realignment is None:
+                    return False
+                target, accepted_odom_yaw = realignment
+                continue
             if x <= center_x and abs(y) <= center_y:
                 center_approach_complete = True
                 break

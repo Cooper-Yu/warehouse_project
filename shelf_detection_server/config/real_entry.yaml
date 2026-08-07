@@ -35,6 +35,7 @@ shelf_detection_server:
     entry_heading_recovery_yaw: 0.12
     entry_reverse_recovery_limit: 2
     entry_reverse_recovery_distance: 0.08
+    entry_lateral_realign_limit: 3
     movement_timeout: 45.0
 
     # Unreachable in entry_only mode; retained as an explicit hard boundary.
