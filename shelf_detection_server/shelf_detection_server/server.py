@@ -163,6 +163,11 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("detection_timeout", 3.0)
         self.declare_parameter("staging_only", False)
         self.declare_parameter("entry_only", False)
+        # Real-robot phase gates keep the final push and lift explicit.
+        self.declare_parameter("final_push_only", False)
+        self.declare_parameter("final_push_enabled", False)
+        self.declare_parameter("elevator_up_enabled", False)
+        self.declare_parameter("elevator_only", False)
         self.declare_parameter("entry_refine_only", False)
         self.declare_parameter("final_center_only", False)
         self.declare_parameter("final_center_confirmed_front_offset", 0.0)
@@ -330,20 +335,57 @@ class ShelfDetectionServer(Node):
         final_center_only = bool(
             self.get_parameter("final_center_only").value
         )
+        final_push_only = bool(
+            self.get_parameter("final_push_only").value
+        )
+        elevator_only = bool(self.get_parameter("elevator_only").value)
         if sum(
             (
                 staging_only,
                 entry_only,
                 entry_refine_only,
                 final_center_only,
+                final_push_only,
+                elevator_only,
             )
         ) > 1:
             self._publish_stop()
             response.complete = False
             self.get_logger().error(
                 "complete=false: staging_only, entry_only, and "
-                "entry_refine_only, and final_center_only are mutually "
+                "entry_refine_only, final_center_only, final_push_only, and "
+                "elevator_only "
+                "are mutually "
                 "exclusive"
+            )
+            return response
+
+        if final_push_only:
+            if not request.attach_to_shelf:
+                self._publish_stop()
+                response.complete = False
+                self.get_logger().error(
+                    "complete=false: final-push-only requires explicit "
+                    "attach_to_shelf=true confirmation"
+                )
+                return response
+            response.complete = self._perform_final_push_only()
+            return response
+
+        if elevator_only:
+            if not request.attach_to_shelf:
+                self._publish_stop()
+                response.complete = False
+                self.get_logger().error(
+                    "complete=false: elevator-only requires explicit "
+                    "attach_to_shelf=true confirmation"
+                )
+                return response
+            self._publish_stop()
+            self._publish_elevator_up()
+            response.complete = True
+            self.get_logger().warning(
+                "complete=true: elevator-only command published"
             )
             return response
 
@@ -405,7 +447,7 @@ class ShelfDetectionServer(Node):
         response.complete = self._perform_stepwise_attach(target)
         if response.complete:
             self.get_logger().info(
-                "complete=true: stepwise attach finished and elevator-up sent"
+                "complete=true: stepwise attach finished"
             )
         else:
             self._publish_stop()
@@ -625,6 +667,40 @@ class ShelfDetectionServer(Node):
             "final push and elevator command were not issued"
         )
         return True
+
+    def _perform_final_push_only(self) -> bool:
+        """Execute only the calibrated final push; never detect or lift."""
+        distance = max(
+            0.0, float(self.get_parameter("final_drive_distance").value)
+        )
+        if distance <= 0.0:
+            self._publish_stop()
+            self.get_logger().error(
+                "complete=false: final-push-only requires "
+                "final_drive_distance > 0"
+            )
+            return False
+        if not bool(self.get_parameter("final_push_enabled").value):
+            self._publish_stop()
+            self.get_logger().error(
+                "complete=false: final-push-only requires "
+                "final_push_enabled=true"
+            )
+            return False
+        deadline = time.monotonic() + float(
+            self.get_parameter("movement_timeout").value
+        )
+        self.get_logger().warning(
+            "final-push-only started: "
+            f"distance={distance:.3f}; elevator-up is disabled"
+        )
+        complete = self._drive_forward_measured(distance, deadline)
+        self._publish_stop()
+        if complete:
+            self.get_logger().info(
+                "complete=true: final-push-only finished; stopped before lift"
+            )
+        return complete
 
     def _wait_for_cart_frame(
         self,
@@ -966,7 +1042,12 @@ class ShelfDetectionServer(Node):
         ):
             return False
         self._publish_stop()
-        self._publish_elevator_up()
+        if bool(self.get_parameter("elevator_up_enabled").value):
+            self._publish_elevator_up()
+        else:
+            self.get_logger().warning(
+                "elevator-up skipped: elevator_up_enabled=false"
+            )
         return True
 
     def _verify_safe_standoff_without_motion(

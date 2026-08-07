@@ -27,6 +27,9 @@ def test_real_entry_profile_is_bounded_and_excludes_final_push():
     assert profile["use_sim_time"] is False
     assert profile["staging_only"] is False
     assert profile["entry_only"] is True
+    assert profile["final_push_only"] is False
+    assert profile["final_push_enabled"] is False
+    assert profile["elevator_up_enabled"] is False
     assert profile["intensity_threshold"] == 4000.0
     assert profile["odom_frame"] == "robot_odom"
     assert profile["yaw_tolerance"] == 0.04
@@ -148,16 +151,53 @@ def test_request_rejects_multiple_real_modes_together():
     assert '"complete=false: staging_only, entry_only, and "' in (
         handler_source
     )
-    assert '"entry_refine_only, and final_center_only are mutually "' in (
+    assert '"entry_refine_only, final_center_only, final_push_only, and "' in (
         handler_source
     )
     rejection = handler_source.index("if sum(")
     final_center = handler_source.index("if final_center_only:")
+    final_push = handler_source.index("if final_push_only:")
     refine = handler_source.index("if entry_refine_only:")
     detection = handler_source.index("target = self._wait_for_cart_frame()")
     staging = handler_source.index("if staging_only:")
     entry = handler_source.index("if entry_only:")
-    assert rejection < final_center < refine < detection < staging < entry
+    assert rejection < final_push < final_center < refine < detection < staging < entry
+
+
+def test_final_push_profile_is_explicit_and_never_lifts():
+    profile = yaml.safe_load(
+        (PACKAGE / "config" / "real_final_push.yaml").read_text()
+    )["shelf_detection_server"]["ros__parameters"]
+
+    assert profile["final_push_only"] is True
+    assert profile["final_push_enabled"] is True
+    assert profile["elevator_up_enabled"] is False
+    assert profile["final_drive_distance"] == 0.3703
+
+
+def test_final_push_only_runtime_stops_without_detection_or_lift():
+    server = object.__new__(ShelfDetectionServer)
+    parameters = {
+        "final_drive_distance": 0.3703,
+        "movement_timeout": 20.0,
+        "final_push_enabled": True,
+    }
+    drives = []
+    stops = []
+    server.get_parameter = lambda name: SimpleNamespace(value=parameters[name])
+    server._drive_forward_measured = (
+        lambda distance, deadline: drives.append(distance) or True
+    )
+    server._publish_stop = lambda: stops.append(True)
+    server.get_logger = lambda: SimpleNamespace(
+        info=lambda message: None,
+        error=lambda message: None,
+        warning=lambda message: None,
+    )
+
+    assert server._perform_final_push_only() is True
+    assert drives == [0.3703]
+    assert len(stops) == 1
 
 
 def test_real_entry_launch_loads_only_real_entry_profile():
