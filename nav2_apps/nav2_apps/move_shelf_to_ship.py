@@ -8,6 +8,7 @@ import time
 from typing import List, Optional
 
 import rclpy
+from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import (
     Point32,
     PolygonStamped,
@@ -1326,6 +1327,35 @@ def _controller_speeds_match(
     )
 
 
+def _scan_clearance_ok(navigator: BasicNavigator, direction: str, required_range: float, timeout: float = 2.0) -> bool:
+    """Require a fresh scan sector before direct loaded correction."""
+    latest = {"scan": None}
+    def callback(message: LaserScan) -> None:
+        latest["scan"] = message
+    sub = navigator.create_subscription(LaserScan, "/scan", callback, 10)
+    centers = {"forward": 0.0, "reverse": math.pi, "left": math.pi / 2.0, "right": -math.pi / 2.0}
+    deadline = time.monotonic() + timeout
+    try:
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(navigator, timeout_sec=0.05)
+            scan = latest["scan"]
+            if scan is None:
+                continue
+            values = []
+            for index, value in enumerate(scan.ranges):
+                if math.isfinite(value):
+                    angle = _normalize_angle(scan.angle_min + index * scan.angle_increment)
+                    if abs(_normalize_angle(angle - centers[direction])) <= 0.45:
+                        values.append(value)
+            if values:
+                minimum = min(values)
+                navigator.get_logger().info(f"shipping scan clearance: direction={direction} min={minimum:.3f} required={required_range:.3f}")
+                return minimum >= required_range
+        navigator.get_logger().error(f"shipping scan clearance unavailable: direction={direction}")
+        return False
+    finally:
+        navigator.destroy_subscription(sub)
+
 def _accept_or_align_shipping_pose(
     navigator: BasicNavigator,
     shipping_pose: PoseStamped,
@@ -1409,9 +1439,16 @@ def _accept_or_align_shipping_pose(
             forward_error = dx * math.cos(current_yaw) + dy * math.sin(current_yaw)
             lateral_error = -dx * math.sin(current_yaw) + dy * math.cos(current_yaw)
             step = min(max(abs(forward_error), abs(lateral_error)), 0.15)
+            required_clearance = 0.41 + 0.15 + step
             if abs(forward_error) >= abs(lateral_error):
+                direction = "forward" if forward_error > 0.0 else "reverse"
+                if not _scan_clearance_ok(navigator, direction, required_clearance):
+                    return False
                 motion_ok = (_bounded_forward_by_odom(navigator, "/cmd_vel", motion_odom_frame, base_frame, step, 0.02, 15.0, 2.0, 0.20, 0.10) if forward_error > 0.0 else _bounded_reverse_by_odom(navigator, "/cmd_vel", motion_odom_frame, base_frame, step, 0.02, 15.0, 2.0, 0.20, 0.10, "shipping forward correction"))
             else:
+                direction = "left" if lateral_error > 0.0 else "right"
+                if not _scan_clearance_ok(navigator, direction, required_clearance):
+                    return False
                 sign = 1.0 if lateral_error > 0.0 else -1.0
                 motion_ok = _bounded_rotate_by_odom(navigator, "/cmd_vel", motion_odom_frame, base_frame, sign * math.pi / 2.0, 0.20, 12.0, 2.0, 0.15)
                 if motion_ok:
