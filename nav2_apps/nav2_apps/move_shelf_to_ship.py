@@ -3647,6 +3647,22 @@ def _run_integrated_mission(
     navigator.get_logger().info(
         "integrated mission: attach -> shipping -> lower -> exit -> return"
     )
+    # Establish the unloaded mechanical state before shelf interaction.
+    if not _apply_unloaded_footprint_verified(
+        navigator,
+        args.unloaded_footprint,
+        args.footprint_timeout,
+        args.footprint_edge_tolerance,
+    ):
+        return ExitCode.UNKNOWN
+    if not _publish_elevator_down_and_wait(
+        navigator,
+        args.elevator_down_topic,
+        args.elevator_down_count,
+        args.elevator_down_interval,
+        args.elevator_down_wait,
+    ):
+        return ExitCode.UNKNOWN
     if not _request_stepwise_attach(
         navigator, args.shelf_service, args.attach_timeout
     ):
