@@ -6,8 +6,13 @@ only supplies real TF/footprint defaults and requires the real loading,
 shipping, and return poses; initial pose is intentionally left to RViz AMCL.
 """
 import argparse
+from pathlib import Path
 import sys
 from typing import Optional, Sequence
+
+_SOURCE_PACKAGE = Path(__file__).resolve().parents[1]
+if str(_SOURCE_PACKAGE) not in sys.path:
+    sys.path.insert(0, str(_SOURCE_PACKAGE))
 
 from nav2_apps import move_shelf_to_ship as mission
 
@@ -16,7 +21,7 @@ REAL_BASE_FRAME = "robot_base_footprint"
 REAL_UNLOADED_FOOTPRINT = "[[0.25, 0.25], [-0.25, 0.25], [-0.25, -0.25], [0.25, -0.25]]"
 REAL_LOADED_FOOTPRINT = "[[0.40, 0.40], [-0.40, 0.40], [-0.40, -0.40], [0.40, -0.40]]"
 REAL_LOADING_POSE = (0.0429566167, 0.6762173176, -1.5707963268)
-REAL_SHIPPING_POSE = (-2.5911982059, 1.8469729424, 1.5707963268)
+REAL_SHIPPING_POSE = (-2.627, 1.730, 1.644)
 REAL_RETURN_POSE = (-4.307, 0.209, 0.198)
 
 
