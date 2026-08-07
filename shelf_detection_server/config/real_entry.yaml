@@ -31,6 +31,10 @@ shelf_detection_server:
     center_lock_min_steps: 2
     center_drive_scale: 1.0
     entry_odom_yaw_tolerance: 0.04
+    entry_heading_recovery_limit: 3
+    entry_heading_recovery_yaw: 0.12
+    entry_reverse_recovery_limit: 2
+    entry_reverse_recovery_distance: 0.08
     movement_timeout: 45.0
 
     # Unreachable in entry_only mode; retained as an explicit hard boundary.

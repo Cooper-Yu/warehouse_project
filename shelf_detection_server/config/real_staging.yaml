@@ -29,6 +29,10 @@ shelf_detection_server:
     alignment_max_reverse_distance: 0.10
     alignment_max_reverse_yaw: 0.70
     alignment_reverse_speed: 0.03
+    entry_heading_recovery_limit: 3
+    entry_heading_recovery_yaw: 0.12
+    entry_reverse_recovery_limit: 2
+    entry_reverse_recovery_distance: 0.08
     movement_timeout: 45.0
 
     # Retained only to keep the full server parameter set explicit. This

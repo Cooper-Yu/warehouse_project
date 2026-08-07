@@ -215,6 +215,10 @@ class ShelfDetectionServer(Node):
         # Lateral corrections have a separate finite budget so staging and
         # heading convergence cannot consume every lateral opportunity.
         self.declare_parameter("lateral_correction_limit", 2)
+        self.declare_parameter("entry_heading_recovery_limit", 3)
+        self.declare_parameter("entry_heading_recovery_yaw", 0.12)
+        self.declare_parameter("entry_reverse_recovery_limit", 2)
+        self.declare_parameter("entry_reverse_recovery_distance", 0.08)
         # Positive target means the shelf midpoint remains to the robot's
         # left, placing the robot slightly right of geometric center.
         self.declare_parameter("lateral_target_offset", 0.0)
@@ -695,6 +699,8 @@ class ShelfDetectionServer(Node):
             return False
         target, accepted_odom_yaw = alignment
         step = 0
+        heading_recoveries = 0
+        reverse_recoveries = 0
         center_approach_complete = False
         while rclpy.ok() and time.monotonic() < deadline:
             frame_id, x, y, shelf_heading = target
@@ -723,8 +729,66 @@ class ShelfDetectionServer(Node):
             if not self._accepted_odom_heading_ok(
                 accepted_odom_yaw, deadline
             ):
-                return False
+                recovery_limit = int(
+                    self.get_parameter("entry_heading_recovery_limit").value
+                )
+                if heading_recoveries >= recovery_limit:
+                    return False
+                heading_recoveries += 1
+                recovery_yaw = max(
+                    -float(self.get_parameter("entry_heading_recovery_yaw").value),
+                    min(
+                        float(self.get_parameter("entry_heading_recovery_yaw").value),
+                        -shelf_heading,
+                    ),
+                )
+                self.get_logger().warning(
+                    "entry heading recovery: "
+                    f"attempt={heading_recoveries}/{recovery_limit} "
+                    f"yaw={recovery_yaw:.3f}"
+                )
+                if not self._rotate_measured(recovery_yaw, deadline):
+                    return False
+                settled = self._wait_for_stable_odom_yaw(deadline)
+                if settled is None:
+                    return False
+                accepted_odom_yaw = settled
+                target = self._detect_cart_frame()
+                if target is None:
+                    return False
+                continue
             if abs(y) > center_y:
+                if x < center_x:
+                    recovery_limit = int(
+                        self.get_parameter("entry_reverse_recovery_limit").value
+                    )
+                    if reverse_recoveries >= recovery_limit:
+                        self.get_logger().error(
+                            "attach stopped: reverse recovery limit exhausted"
+                        )
+                        return False
+                    reverse_recoveries += 1
+                    reverse_distance = float(
+                        self.get_parameter(
+                            "entry_reverse_recovery_distance"
+                        ).value
+                    )
+                    self.get_logger().warning(
+                        "entry distance recovery: reversing "
+                        f"attempt={reverse_recoveries}/{recovery_limit} "
+                        f"distance={reverse_distance:.3f}"
+                    )
+                    scan_before_motion = self._current_scan_sequence()
+                    if not self._drive_forward_measured(
+                        -reverse_distance, deadline
+                    ):
+                        return False
+                    target = self._recover_cart_frame_after_motion(
+                        scan_before_motion, deadline
+                    )
+                    if target is None:
+                        return False
+                    continue
                 self.get_logger().error(
                     "attach stopped: midpoint left the centered corridor; "
                     f"y={y:.3f} tolerance={center_y:.3f}"
