@@ -26,7 +26,7 @@ shelf_detection_server:
     forward_speed: 0.05
     forward_step_distance: 0.15
     center_distance_tolerance: 0.20
-    center_lateral_tolerance: 0.08
+    center_lateral_tolerance: 0.03
     # Match the simulation's bounded close-range recovery: after the last
     # fresh cart_frame, use the measured remaining distance only when the
     # estimate is inside this finite window.
@@ -39,6 +39,17 @@ shelf_detection_server:
     entry_reverse_recovery_limit: 2
     entry_reverse_recovery_distance: 0.08
     entry_lateral_realign_limit: 3
+    lateral_execution_enabled: true
+    lateral_correction_limit: 3
+    lateral_target_tolerance: 0.02
+    lateral_correction_ratio: 0.50
+    lateral_min_drive_distance: 0.005
+    lateral_speed_error_floor: 0.01
+    lateral_speed_error_ceiling: 0.12
+    lateral_rotate_speed: 0.03
+    lateral_drive_speed: 0.02
+    lateral_max_drive_distance: 0.10
+    lateral_clearance_min_range: 1.00
     entry_final_standoff: 0.15
     entry_blind_step_distance: 0.15
     entry_blind_max_distance: 0.80

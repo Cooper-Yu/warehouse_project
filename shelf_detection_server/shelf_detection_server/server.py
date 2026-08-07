@@ -236,6 +236,9 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("lateral_temporary_yaw", 0.5235987756)
         self.declare_parameter("lateral_max_abs_yaw", 0.55)
         self.declare_parameter("lateral_max_drive_distance", 0.20)
+        self.declare_parameter("lateral_min_drive_distance", 0.005)
+        self.declare_parameter("lateral_speed_error_floor", 0.01)
+        self.declare_parameter("lateral_speed_error_ceiling", 0.12)
         self.declare_parameter("lateral_rotate_speed", 0.05)
         self.declare_parameter("lateral_drive_speed", 0.05)
         self.declare_parameter("lateral_clearance_min_range", 0.90)
@@ -1235,6 +1238,7 @@ class ShelfDetectionServer(Node):
         drive_distance: float,
         entry_odom_yaw: float,
         deadline: float,
+        action_error: Optional[float] = None,
     ) -> Optional[tuple]:
         """Execute one bounded turn-drive-restore lateral correction."""
         evidence = LateralExecutionEvidence(True, True, True)
@@ -1247,6 +1251,12 @@ class ShelfDetectionServer(Node):
             0.0,
             float(self.get_parameter("lateral_drive_speed").value),
         )
+        if action_error is not None and math.isfinite(action_error):
+            floor = max(0.0, float(self.get_parameter("lateral_speed_error_floor").value))
+            ceiling = max(floor, float(self.get_parameter("lateral_speed_error_ceiling").value))
+            scale = min(max(abs(action_error), floor) / ceiling, 1.0)
+            rotate_speed *= scale
+            drive_speed *= scale
 
         scan_before_motion = self._current_scan_sequence()
         evidence = invalidate_on_action_start(evidence)
@@ -1511,6 +1521,13 @@ class ShelfDetectionServer(Node):
                             "lateral_max_drive_distance"
                         ).value
                     ),
+                    min_drive_distance=(
+                        float(self.get_parameter("lateral_min_drive_distance").value)
+                        if hasattr(self, "has_parameter")
+                        and self.has_parameter("lateral_min_drive_distance")
+                        else 0.005
+                    ),
+                    target_tolerance=lateral_tolerance,
                 )
                 if plan is None or stopped_yaw is None:
                     self._publish_stop()
@@ -1545,6 +1562,7 @@ class ShelfDetectionServer(Node):
                     plan.drive_distance,
                     stopped_yaw,
                     deadline,
+                    target_relative_lateral_error,
                 )
                 if target is None:
                     return None

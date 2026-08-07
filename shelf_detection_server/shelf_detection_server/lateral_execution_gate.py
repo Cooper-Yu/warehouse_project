@@ -14,6 +14,8 @@ def plan_lateral_action_if_safe(
     temporary_yaw: float,
     max_abs_yaw: float,
     max_drive_distance: float,
+    min_drive_distance: float = 0.0,
+    target_tolerance: float = 0.0,
 ) -> Optional[LateralActionPlan]:
     """Delegate only when all execution evidence is currently accepted."""
     if not (
@@ -28,4 +30,6 @@ def plan_lateral_action_if_safe(
         temporary_yaw,
         max_abs_yaw,
         max_drive_distance,
+        min_drive_distance,
+        target_tolerance,
     )

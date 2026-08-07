@@ -1,6 +1,6 @@
 """Pure one-round lateral action candidate planner."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from typing import Optional
 
@@ -12,6 +12,7 @@ SIN_EPSILON = 1.0e-6
 class LateralActionPlan:
     signed_yaw: float
     drive_distance: float
+    error_magnitude: float = field(default=0.0, compare=False)
 
 
 def plan_lateral_action(
@@ -20,6 +21,8 @@ def plan_lateral_action(
     temporary_yaw: float,
     max_abs_yaw: float,
     max_drive_distance: float,
+    min_drive_distance: float = 0.0,
+    target_tolerance: float = 0.0,
 ) -> Optional[LateralActionPlan]:
     """Return one bounded geometry candidate or None when unsafe/invalid."""
     values = (
@@ -28,6 +31,8 @@ def plan_lateral_action(
         temporary_yaw,
         max_abs_yaw,
         max_drive_distance,
+        min_drive_distance,
+        target_tolerance,
     )
     if not all(math.isfinite(value) for value in values):
         return None
@@ -37,6 +42,9 @@ def plan_lateral_action(
         or temporary_yaw == 0.0
         or max_abs_yaw <= 0.0
         or max_drive_distance <= 0.0
+        or min_drive_distance < 0.0
+        or target_tolerance < 0.0
+        or abs(lateral_error) <= target_tolerance
     ):
         return None
 
@@ -45,11 +53,11 @@ def plan_lateral_action(
     if abs(sin_yaw) < SIN_EPSILON:
         return None
 
-    drive_distance = target_lateral / abs(sin_yaw)
+    drive_distance = max(target_lateral / abs(sin_yaw), min_drive_distance)
     signed_yaw = math.copysign(abs(temporary_yaw), lateral_error)
     if (
         abs(signed_yaw) > max_abs_yaw
         or drive_distance > max_drive_distance
     ):
         return None
-    return LateralActionPlan(signed_yaw, drive_distance)
+    return LateralActionPlan(signed_yaw, drive_distance, abs(lateral_error))
