@@ -3667,6 +3667,11 @@ def _run_integrated_mission(
         navigator, args.shelf_service, args.attach_timeout
     ):
         return ExitCode.UNKNOWN
+    _hold_zero_velocity(navigator, args.cmd_vel_topic)
+    navigator.get_logger().warning(
+        "elevator-up safety gate: attach/final-push complete; robot stopped; "
+        f"waiting {args.elevator_wait:.1f}s before shipping navigation"
+    )
     if not _settle_without_motion(navigator, args.elevator_wait):
         return ExitCode.UNKNOWN
     if not _apply_loaded_footprint_verified(
@@ -3869,6 +3874,11 @@ def _run_integrated_mission(
         args.elevator_down_wait,
     ):
         return ExitCode.UNKNOWN
+    _hold_zero_velocity(navigator, args.cmd_vel_topic)
+    navigator.get_logger().warning(
+        "elevator-down safety gate: lowering command window complete; "
+        f"robot stopped before shelf exit (waited {args.elevator_down_wait:.1f}s)"
+    )
     if not _exit_restore_integrated(navigator, args):
         return ExitCode.UNKNOWN
 
