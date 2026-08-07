@@ -170,7 +170,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--shipping-timeout", type=float, default=180.0)
     parser.add_argument(
-        "--shipping-position-tolerance", type=float, default=0.25
+        "--shipping-position-tolerance", type=float, default=0.30
     )
     parser.add_argument(
         "--shipping-yaw-tolerance", type=float, default=0.10

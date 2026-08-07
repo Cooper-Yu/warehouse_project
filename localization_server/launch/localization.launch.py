@@ -136,7 +136,6 @@ def generate_launch_description():
             executable="loaded_scan_filter.py",
             name="loaded_scan_filter",
             output="screen",
-            condition=IfCondition(use_sim_time),
             parameters=[{"use_sim_time": use_sim_time_value}],
         ),
         Node(
