@@ -913,6 +913,14 @@ class ShelfDetectionServer(Node):
                     ):
                         return False
                     blind_remaining -= segment
+                    if blind_remaining <= 0.0:
+                        self._publish_stop()
+                        self.get_logger().info(
+                            "bounded segmented entry complete: "
+                            f"final_standoff={final_standoff:.3f}"
+                        )
+                        center_approach_complete = True
+                        break
                     recovered = self._recover_cart_frame_after_motion(
                         self._current_scan_sequence(), deadline
                     )
