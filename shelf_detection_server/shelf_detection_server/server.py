@@ -921,12 +921,10 @@ class ShelfDetectionServer(Node):
                         )
                         center_approach_complete = True
                         break
-                    recovered = self._recover_cart_frame_after_motion(
-                        self._current_scan_sequence(), deadline
-                    )
-                    if recovered is not None:
-                        target = recovered
-                        break
+                    # Once close-range detection has been lost, remain in
+                    # bounded blind-entry mode. Do not spend the remaining
+                    # mission deadline on repeated cart_frame recovery waits;
+                    # odometry distance and heading guards remain active.
                 else:
                     center_approach_complete = True
                     break
