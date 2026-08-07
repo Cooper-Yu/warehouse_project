@@ -2,7 +2,7 @@ shelf_detection_server:
   ros__parameters:
     use_sim_time: false
     staging_only: false
-    entry_only: true
+    entry_only: false
     intensity_threshold: 4000.0
     min_cluster_size: 2
     max_x_difference: 0.75
@@ -41,5 +41,6 @@ shelf_detection_server:
     entry_blind_max_distance: 0.80
     movement_timeout: 45.0
 
-    # Unreachable in entry_only mode; retained as an explicit hard boundary.
+    # Segmented entry reaches the calibrated final standoff; complete mode
+    # stops there and proceeds directly to the elevator command.
     final_drive_distance: 0.0
