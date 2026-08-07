@@ -170,7 +170,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--shipping-timeout", type=float, default=180.0)
     parser.add_argument(
-        "--shipping-position-tolerance", type=float, default=0.30
+        "--shipping-position-tolerance", type=float, default=0.05
     )
     parser.add_argument(
         "--shipping-yaw-tolerance", type=float, default=0.10
@@ -179,7 +179,7 @@ def _parser() -> argparse.ArgumentParser:
         "--shipping-max-yaw-correction", type=float, default=0.40
     )
     parser.add_argument(
-        "--shipping-alignment-timeout", type=float, default=15.0
+        "--shipping-alignment-timeout", type=float, default=60.0
     )
     parser.add_argument(
         "--shipping-yaw-correction-ratio", type=float, default=0.5
@@ -1388,13 +1388,39 @@ def _accept_or_align_shipping_pose(
             f"position_error={position_error:.3f} "
             f"yaw_error={yaw_error:.3f}"
         )
-        if position_error > position_tolerance:
+        if position_error > 0.30:
             navigator.get_logger().error(
-                "shipping alignment rejected: position is outside the "
-                f"acceptance radius ({position_error:.3f}>"
-                f"{position_tolerance:.3f})"
+                "shipping alignment rejected: position exceeds bounded "
+                f"correction radius ({position_error:.3f}>0.300)"
             )
             return False
+        if position_error <= position_tolerance and abs(yaw_error) <= yaw_tolerance:
+            navigator.get_logger().info("shipping final pose accepted")
+            return True
+        if position_error > position_tolerance:
+            current_x = transform.transform.translation.x
+            current_y = transform.transform.translation.y
+            current_yaw = _yaw_from_rotation(transform.transform.rotation)
+            motion_odom_frame = (
+                "robot_odom" if base_frame.startswith("robot_") else "odom"
+            )
+            dx = target_x - current_x
+            dy = target_y - current_y
+            forward_error = dx * math.cos(current_yaw) + dy * math.sin(current_yaw)
+            lateral_error = -dx * math.sin(current_yaw) + dy * math.cos(current_yaw)
+            step = min(max(abs(forward_error), abs(lateral_error)), 0.15)
+            if abs(forward_error) >= abs(lateral_error):
+                motion_ok = (_bounded_forward_by_odom(navigator, "/cmd_vel", motion_odom_frame, base_frame, step, 0.02, 15.0, 2.0, 0.20, 0.10) if forward_error > 0.0 else _bounded_reverse_by_odom(navigator, "/cmd_vel", motion_odom_frame, base_frame, step, 0.02, 15.0, 2.0, 0.20, 0.10, "shipping forward correction"))
+            else:
+                sign = 1.0 if lateral_error > 0.0 else -1.0
+                motion_ok = _bounded_rotate_by_odom(navigator, "/cmd_vel", motion_odom_frame, base_frame, sign * math.pi / 2.0, 0.20, 12.0, 2.0, 0.15)
+                if motion_ok:
+                    motion_ok = (_bounded_forward_by_odom(navigator, "/cmd_vel", motion_odom_frame, base_frame, step, 0.02, 15.0, 2.0, 0.20, 0.10) if lateral_error > 0.0 else _bounded_reverse_by_odom(navigator, "/cmd_vel", motion_odom_frame, base_frame, step, 0.02, 15.0, 2.0, 0.20, 0.10, "shipping lateral correction"))
+                if motion_ok:
+                    motion_ok = _bounded_rotate_by_odom(navigator, "/cmd_vel", motion_odom_frame, base_frame, -sign * math.pi / 2.0, 0.20, 12.0, 2.0, 0.15)
+            if not motion_ok:
+                return False
+            continue
         if abs(yaw_error) <= yaw_tolerance:
             return True
         if abs(yaw_error) > max_yaw_correction:
