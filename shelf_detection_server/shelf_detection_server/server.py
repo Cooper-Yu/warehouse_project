@@ -239,6 +239,11 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("lateral_min_drive_distance", 0.005)
         self.declare_parameter("lateral_speed_error_floor", 0.01)
         self.declare_parameter("lateral_speed_error_ceiling", 0.12)
+        self.declare_parameter("lateral_min_rotate_speed", 0.03)
+        self.declare_parameter("lateral_min_drive_speed", 0.015)
+        self.declare_parameter("lateral_min_temporary_yaw", 0.25)
+        self.declare_parameter("lateral_yaw_error_gain", 5.5)
+        self.declare_parameter("lateral_action_timeout", 25.0)
         self.declare_parameter("lateral_rotate_speed", 0.05)
         self.declare_parameter("lateral_drive_speed", 0.05)
         self.declare_parameter("lateral_clearance_min_range", 0.90)
@@ -1255,17 +1260,33 @@ class ShelfDetectionServer(Node):
             floor = max(0.0, float(self.get_parameter("lateral_speed_error_floor").value))
             ceiling = max(floor, float(self.get_parameter("lateral_speed_error_ceiling").value))
             scale = min(max(abs(action_error), floor) / ceiling, 1.0)
-            rotate_speed *= scale
-            drive_speed *= scale
+            rotate_speed = max(
+                float(self.get_parameter("lateral_min_rotate_speed").value),
+                rotate_speed * scale,
+            )
+            drive_speed = max(
+                float(self.get_parameter("lateral_min_drive_speed").value),
+                drive_speed * scale,
+            )
+
+        action_timeout = (
+            float(self.get_parameter("lateral_action_timeout").value)
+            if hasattr(self, "has_parameter")
+            and self.has_parameter("lateral_action_timeout")
+            else 25.0
+        )
+        action_deadline = min(
+            deadline, time.monotonic() + max(5.0, action_timeout)
+        )
 
         scan_before_motion = self._current_scan_sequence()
         evidence = invalidate_on_action_start(evidence)
         if not self._rotate_measured(
-            signed_yaw, deadline, rotate_speed
+            signed_yaw, action_deadline, rotate_speed
         ):
             return None
         refreshed = self._settle_and_refresh_lateral(
-            evidence, scan_before_motion, deadline
+            evidence, scan_before_motion, action_deadline
         )
         if refreshed is None:
             return None
@@ -1274,28 +1295,28 @@ class ShelfDetectionServer(Node):
         scan_before_motion = self._current_scan_sequence()
         evidence = invalidate_on_action_start(evidence)
         if not self._drive_forward_measured(
-            drive_distance, deadline, drive_speed
+            drive_distance, action_deadline, drive_speed
         ):
             return None
         refreshed = self._settle_and_refresh_lateral(
-            evidence, scan_before_motion, deadline
+            evidence, scan_before_motion, action_deadline
         )
         if refreshed is None:
             return None
         target, evidence = refreshed
 
-        current_yaw = self._wait_for_stable_odom_yaw(deadline)
+        current_yaw = self._wait_for_stable_odom_yaw(action_deadline)
         if current_yaw is None:
             return None
         restore_yaw = normalize_angle(entry_odom_yaw - current_yaw)
         scan_before_motion = self._current_scan_sequence()
         evidence = invalidate_on_action_start(evidence)
         if abs(restore_yaw) > 0.0 and not self._rotate_measured(
-            restore_yaw, deadline, rotate_speed
+            restore_yaw, action_deadline, rotate_speed
         ):
             return None
         refreshed = self._settle_and_refresh_lateral(
-            evidence, scan_before_motion, deadline
+            evidence, scan_before_motion, action_deadline
         )
         if refreshed is None:
             return None
@@ -1528,6 +1549,12 @@ class ShelfDetectionServer(Node):
                         else 0.005
                     ),
                     target_tolerance=lateral_tolerance,
+                    min_temporary_yaw=float(
+                        self.get_parameter("lateral_min_temporary_yaw").value
+                    ),
+                    yaw_error_gain=float(
+                        self.get_parameter("lateral_yaw_error_gain").value
+                    ),
                 )
                 if plan is None or stopped_yaw is None:
                     self._publish_stop()

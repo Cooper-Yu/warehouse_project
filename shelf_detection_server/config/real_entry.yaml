@@ -46,6 +46,11 @@ shelf_detection_server:
     lateral_min_drive_distance: 0.005
     lateral_speed_error_floor: 0.01
     lateral_speed_error_ceiling: 0.12
+    lateral_min_rotate_speed: 0.03
+    lateral_min_drive_speed: 0.015
+    lateral_min_temporary_yaw: 0.25
+    lateral_yaw_error_gain: 5.5
+    lateral_action_timeout: 25.0
     lateral_rotate_speed: 0.03
     lateral_drive_speed: 0.02
     lateral_max_drive_distance: 0.10
