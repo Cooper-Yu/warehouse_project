@@ -51,6 +51,9 @@ shelf_detection_server:
     lateral_min_temporary_yaw: 0.25
     lateral_yaw_error_gain: 5.5
     lateral_action_timeout: 25.0
+    lateral_reverse_recovery_limit: 2
+    lateral_reverse_recovery_distance: 0.08
+    lateral_reverse_recovery_speed: 0.02
     lateral_rotate_speed: 0.03
     lateral_drive_speed: 0.02
     lateral_max_drive_distance: 0.10

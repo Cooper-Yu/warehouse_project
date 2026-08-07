@@ -244,6 +244,9 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("lateral_min_temporary_yaw", 0.25)
         self.declare_parameter("lateral_yaw_error_gain", 5.5)
         self.declare_parameter("lateral_action_timeout", 25.0)
+        self.declare_parameter("lateral_reverse_recovery_limit", 2)
+        self.declare_parameter("lateral_reverse_recovery_distance", 0.08)
+        self.declare_parameter("lateral_reverse_recovery_speed", 0.02)
         self.declare_parameter("lateral_rotate_speed", 0.05)
         self.declare_parameter("lateral_drive_speed", 0.05)
         self.declare_parameter("lateral_clearance_min_range", 0.90)
@@ -1425,6 +1428,7 @@ class ShelfDetectionServer(Node):
         aligned_samples = 0
         alignment_correction_count = 0
         lateral_correction_count = 0
+        lateral_reverse_count = 0
         lateral_observation_allowance = (
             lateral_correction_limit if lateral_execution_enabled else 0
         )
@@ -1519,6 +1523,82 @@ class ShelfDetectionServer(Node):
                 clearance_accepted = self._lateral_clearance_accepted(
                     target
                 )
+                if not clearance_accepted:
+                    reverse_limit = max(
+                        0,
+                        int(
+                            self.get_parameter(
+                                "lateral_reverse_recovery_limit"
+                            ).value
+                        ),
+                    )
+                    if lateral_reverse_count >= reverse_limit:
+                        self._publish_stop()
+                        self.get_logger().error(
+                            "lateral-centering stopped: clearance too close "
+                            "and reverse recovery budget exhausted"
+                        )
+                        return None
+                    reverse_distance = min(
+                        max(
+                            0.0,
+                            float(
+                                self.get_parameter(
+                                    "lateral_reverse_recovery_distance"
+                                ).value
+                            ),
+                        ),
+                        max(
+                            0.0,
+                            float(
+                                self.get_parameter(
+                                    "alignment_max_reverse_distance"
+                                ).value
+                            ),
+                        ),
+                    )
+                    reverse_speed = max(
+                        0.0,
+                        float(
+                            self.get_parameter(
+                                "lateral_reverse_recovery_speed"
+                            ).value
+                        ),
+                    )
+                    if (
+                        stopped_yaw is None
+                        or reverse_distance <= 0.0
+                        or reverse_speed <= 0.0
+                    ):
+                        self._publish_stop()
+                        self.get_logger().error(
+                            "lateral-centering stopped: reverse recovery "
+                            "preconditions rejected"
+                        )
+                        return None
+                    lateral_reverse_count += 1
+                    self.get_logger().warning(
+                        "lateral-centering distance recovery: reversing "
+                        f"attempt={lateral_reverse_count}/{reverse_limit} "
+                        f"distance={reverse_distance:.3f} "
+                        f"range={math.hypot(x, y):.3f}"
+                    )
+                    scan_before_reverse = self._current_scan_sequence()
+                    if not self._drive_forward_measured(
+                        -reverse_distance, deadline, reverse_speed
+                    ):
+                        return None
+                    target = self._recover_cart_frame_after_motion(
+                        scan_before_reverse, deadline
+                    )
+                    if target is None:
+                        self._publish_stop()
+                        self.get_logger().error(
+                            "lateral-centering stopped: no fresh geometry "
+                            "after reverse recovery"
+                        )
+                        return None
+                    continue
                 plan = plan_lateral_action_if_safe(
                     observation_fresh=observation_fresh,
                     clearance_accepted=clearance_accepted,
