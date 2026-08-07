@@ -126,10 +126,11 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "use_keepout",
-                default_value=use_sim_time,
+                default_value="true",
                 description=(
-                    "Start the keepout mask/filter chain. Defaults to enabled "
-                    "for simulation and disabled for the still-gated real profile."
+                    "Start the keepout mask/filter chain. Enabled by default "
+                    "for both simulation and the real robot; override explicitly "
+                    "only for a diagnostic run."
                 ),
             ),
             DeclareLaunchArgument(
