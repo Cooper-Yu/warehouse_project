@@ -59,6 +59,79 @@ ros2 launch path_planner_server navigation.launch.py use_sim_time:=true
 Set `2D Pose Estimate`, wait until the Navigation 2 panel reports active,
 then send a `Nav2 Goal`.
 
+## Simulation Full Mission
+
+The simulation uses the simulation map, simulation clock, and simulation Nav2
+profiles. Start the simulator/robot description first, then use three ROS 2
+terminals.
+
+Build the workspace:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ~/ros2_ws
+colcon build --packages-select \
+  localization_server path_planner_server shelf_detection_server nav2_apps \
+  2>&1 | tee ~/build_simulation_runtime.log
+source ~/ros2_ws/install/setup.bash
+```
+
+Terminal 1 — simulation localization:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+ros2 launch localization_server localization.launch.py \
+  map_file:=warehouse_map_keepout_sim.yaml \
+  2>&1 | tee ~/sim_localization.log
+```
+
+The simulation launch derives `use_sim_time:=true`, selects
+`amcl_config_sim.yaml`, and starts the same `loaded_scan_filter` node. The
+filter output is `/scan_localization`, which AMCL consumes.
+
+Terminal 2 — simulation Nav2, keepout, and RViz:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+ros2 launch path_planner_server pathplanner.launch.py \
+  use_sim_time:=True \
+  2>&1 | tee ~/sim_pathplanner.log
+```
+
+With simulation time, the launch automatically selects
+`warehouse_map_keepout_sim_mask.yaml` and the simulation planner/controller
+profiles. RViz is owned by this launch.
+
+Terminal 3 — simulation mission:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+timeout 500 python3 \
+  ~/ros2_ws/src/warehouse_project/nav2_apps/scripts/move_shelf_to_ship.py \
+  2>&1 | tee ~/sim_full_mission.log
+```
+
+For a navigation-only smoke test, use the installed Nav2 launch and send a
+`Nav2 Goal` from RViz instead of running the shelf mission.
+
+Simulation checks:
+
+```bash
+ros2 lifecycle get /amcl
+ros2 lifecycle get /planner_server
+ros2 lifecycle get /controller_server
+ros2 lifecycle get /bt_navigator
+ros2 param get /amcl scan_topic
+ros2 node list | grep -E \
+  'filter_mask_server|costmap_filter_info_server|shelf_detection_server'
+```
+
+Expected simulation values include active lifecycle states, AMCL using
+`/scan_localization`, and the simulation keepout mask/filter nodes.
+
 ## Debug Bundle
 
 While navigation is running:
