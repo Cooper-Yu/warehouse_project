@@ -108,7 +108,7 @@ def _parser() -> argparse.ArgumentParser:
             "and wait for external lift acceptance."
         ),
     )
-    parser.add_argument("--attach-timeout", type=float, default=60.0)
+    parser.add_argument("--attach-timeout", type=float, default=180.0)
     parser.add_argument("--elevator-wait", type=float, default=8.0)
     parser.add_argument(
         "--loaded-footprint-only",
