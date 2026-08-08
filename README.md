@@ -98,3 +98,103 @@ controller is `diff_drive_controller/DiffDriveController`, so lateral velocity
 remains disabled. The real profile uses conservative Nav2 limits below the
 base-controller maximums and passed controlled real-lab validation. Its
 controller frequency is fixed at the checkpoint-required 5 Hz.
+
+## Real Robot Full Mission
+
+Before starting, stop any previous mission, confirm the robot and shelf are
+safe, and place the robot at the calibrated loading position. Synchronize and
+build the workspace first:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ~/ros2_ws/src/warehouse_project
+git pull --ff-only origin master
+cd ~/ros2_ws
+colcon build --packages-select \
+  localization_server path_planner_server shelf_detection_server nav2_apps \
+  2>&1 | tee ~/build_real_mission.log
+source ~/ros2_ws/install/setup.bash
+```
+
+Run the following in three terminals.
+
+Terminal 1 — localization, AMCL, and the loaded-scan filter:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+ros2 launch localization_server localization.launch.py \
+  map_file:=warehouse_map_real.yaml \
+  2>&1 | tee ~/real_localization.log
+```
+
+AMCL uses `/scan_localization`; the filter passes the raw scan while unloaded
+and removes near self-returns after loading. The ordinary real map is used for
+localization. Keepout is not part of the AMCL map.
+
+Terminal 2 — Nav2, RViz, keepout mask, and shelf service:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+ros2 launch path_planner_server pathplanner.launch.py \
+  use_sim_time:=False \
+  2>&1 | tee ~/real_pathplanner.log
+```
+
+The launch automatically starts `filter_mask_server`,
+`costmap_filter_info_server`, and `shelf_detection_server`. The keepout mask
+is selected separately as `warehouse_map_keepout_real_mask.yaml` and modifies
+Nav2 traversability without changing AMCL's map model.
+
+Terminal 3 — complete shelf mission:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+timeout 500 python3 \
+  ~/ros2_ws/src/warehouse_project/nav2_apps/scripts/move_shelf_to_ship_real.py \
+  2>&1 | tee ~/real_full_mission.log
+```
+
+The default integrated mission is:
+
+```text
+loading position -> unloaded footprint -> elevator down
+-> multi-frame shelf centering -> segmented entry
+-> final push (0.3703 m) -> elevator up -> loaded footprint
+-> shipping navigation -> elevator down -> bounded shelf exit
+-> CLEAR_OF_SHELF -> unloaded footprint -> return position
+```
+
+The attach client waits up to 180 seconds, while the shelf server retains its
+own bounded motion watchdog. A failed stage publishes zero velocity and does
+not continue to the next stage.
+
+## Real Mission Checks and Logs
+
+Before running the mission:
+
+```bash
+ros2 param get /amcl scan_topic
+timeout 5 ros2 topic hz /scan_localization
+ros2 node list | grep -E \
+  'filter_mask_server|costmap_filter_info_server|planner_server|controller_server|bt_navigator|shelf_detection_server'
+ros2 service list | grep approach_shelf
+```
+
+Useful post-run summary:
+
+```bash
+grep -Ei \
+  'loading_position|safe-standoff|stepwise attach|center approach speed|blind entry|final push|elevator-up|shipping_position|CLEAR_OF_SHELF|unloaded_footprint|return|succeeded|failed|timeout|exception' \
+  ~/real_full_mission.log \
+  | tee ~/real_full_mission_summary.log
+```
+
+If motion must be stopped immediately:
+
+```bash
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.0}, angular: {z: 0.0}}"
+```
