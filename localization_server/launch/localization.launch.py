@@ -20,7 +20,8 @@ def generate_launch_description():
     initial_x = LaunchConfiguration("initial_x")
     initial_y = LaunchConfiguration("initial_y")
     initial_yaw = LaunchConfiguration("initial_yaw")
-    # map_file selects matching clock and AMCL defaults.
+    # Localization owns the ordinary map and AMCL.  Keepout is deliberately
+    # left to Nav2 costmaps so the safety mask never changes AMCL's map model.
     use_sim_time_value = ParameterValue(use_sim_time, value_type=bool)
     auto_initial_pose_enabled = PythonExpression([
         "'true' if '",
@@ -136,6 +137,9 @@ def generate_launch_description():
             executable="loaded_scan_filter.py",
             name="loaded_scan_filter",
             output="screen",
+            # AMCL always receives the filtered stream.  The filter passes the
+            # raw scan through when unloaded and suppresses near self-returns
+            # after the elevator-up event.
             parameters=[{"use_sim_time": use_sim_time_value}],
         ),
         Node(

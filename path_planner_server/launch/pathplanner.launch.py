@@ -133,6 +133,8 @@ def generate_launch_description():
                     "only for a diagnostic run."
                 ),
             ),
+            # The static /map comes from localization.  This separate mask is
+            # consumed by KeepoutFilter and only modifies Nav2 traversability.
             DeclareLaunchArgument(
                 "use_rviz",
                 default_value="true",

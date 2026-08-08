@@ -3647,7 +3647,8 @@ def _run_integrated_mission(
     navigator.get_logger().info(
         "integrated mission: attach -> shipping -> lower -> exit -> return"
     )
-    # Establish the unloaded mechanical state before shelf interaction.
+    # Establish the unloaded mechanical state before shelf interaction.  The
+    # later loaded footprint is applied only after attach/final-push succeeds.
     if not _apply_unloaded_footprint_verified(
         navigator,
         args.unloaded_footprint,
@@ -3663,6 +3664,9 @@ def _run_integrated_mission(
         args.elevator_down_wait,
     ):
         return ExitCode.UNKNOWN
+    # The service owns bounded centering, entry and final push; the client
+    # waits up to attach_timeout (180 s) while the server keeps its own motion
+    # watchdog and publishes zero velocity on failure.
     if not _request_stepwise_attach(
         navigator, args.shelf_service, args.attach_timeout
     ):
