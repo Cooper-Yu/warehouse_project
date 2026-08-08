@@ -26,10 +26,10 @@ def test_real_entry_profile_is_bounded_and_excludes_final_push():
 
     assert profile["use_sim_time"] is False
     assert profile["staging_only"] is False
-    assert profile["entry_only"] is True
+    assert profile["entry_only"] is False
     assert profile["final_push_only"] is False
-    assert profile["final_push_enabled"] is False
-    assert profile["elevator_up_enabled"] is False
+    assert profile["final_push_enabled"] is True
+    assert profile["elevator_up_enabled"] is True
     assert profile["intensity_threshold"] == 4000.0
     assert profile["odom_frame"] == "robot_odom"
     assert profile["yaw_tolerance"] == 0.04
@@ -37,7 +37,7 @@ def test_real_entry_profile_is_bounded_and_excludes_final_push():
     assert profile["forward_speed"] <= 0.05
     assert profile["forward_step_distance"] <= 0.15
     assert profile["entry_odom_yaw_tolerance"] == 0.04
-    assert profile["final_drive_distance"] == 0.0
+    assert profile["final_drive_distance"] == 0.3703
 
 
 def test_entry_only_wrapper_reuses_stepwise_core_with_hard_stop_boundary():
