@@ -219,6 +219,7 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("forward_step_distance", 0.20)
         self.declare_parameter("center_distance_tolerance", 0.20)
         self.declare_parameter("center_lateral_tolerance", 0.08)
+        self.declare_parameter("entry_lateral_realign_deadband", 0.08)
         # The executor remains opt-in until a separate simulation runtime
         # gate accepts the connected motion path.
         self.declare_parameter("lateral_execution_enabled", False)
