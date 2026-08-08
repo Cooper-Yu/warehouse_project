@@ -48,6 +48,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--elevator-down-count", type=int, default=5)
     p.add_argument("--elevator-up-wait", type=float, default=4.0)
     p.add_argument("--elevator-down-wait", type=float, default=4.0)
+    p.add_argument("--attach-timeout", type=float, default=180.0)
     p.add_argument("--exit-distance", type=float, default=1.0)
     p.add_argument("--exit-speed", type=float, default=0.05)
     p.add_argument("--confirm-lift-accepted", action="store_true")
@@ -91,6 +92,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--elevator-down-wait", str(args.elevator_down_wait),
         "--exit-distance", str(args.exit_distance),
         "--exit-speed", str(args.exit_speed),
+        "--attach-timeout", str(args.attach_timeout),
     ]
     delegated += _pose_args(args, "loading") + _pose_args(args, "shipping") + _pose_args(args, "return")
     if args.stop_at_shipping:
