@@ -766,6 +766,38 @@ class ShelfDetectionServer(Node):
         middle = len(samples) // 2
         return frame_id, xs[middle], ys[middle], heading
 
+    def _wait_for_cart_frame_consensus_after(
+        self, after_sequence: int, timeout_seconds: float
+    ) -> Optional[tuple]:
+        """Collect a multi-frame consensus using only scans after motion."""
+        count = max(1, int(self.get_parameter("entry_observation_frames").value))
+        interval = max(0.0, float(self.get_parameter("entry_observation_interval").value))
+        samples = []
+        last_sequence = after_sequence
+        deadline = time.monotonic() + max(0.05, timeout_seconds)
+        while rclpy.ok() and time.monotonic() < deadline and len(samples) < count:
+            sequence = self._current_scan_sequence()
+            if sequence <= last_sequence:
+                time.sleep(0.01)
+                continue
+            target = self._detect_cart_frame()
+            last_sequence = sequence
+            if target is not None:
+                samples.append(target)
+            if len(samples) < count:
+                time.sleep(interval)
+        if len(samples) < count:
+            return None
+        frame_id = samples[-1][0]
+        xs = sorted(sample[1] for sample in samples)
+        ys = sorted(sample[2] for sample in samples)
+        headings = [sample[3] for sample in samples]
+        heading = math.atan2(
+            sum(math.sin(value) for value in headings),
+            sum(math.cos(value) for value in headings),
+        )
+        return frame_id, xs[len(samples) // 2], ys[len(samples) // 2], heading
+
     def _current_scan_sequence(self) -> int:
         with self._scan_lock:
             return self._scan_sequence
@@ -1968,8 +2000,8 @@ class ShelfDetectionServer(Node):
     def _recover_cart_frame_after_motion(
         self, after_sequence: int, deadline: float
     ) -> Optional[tuple]:
-        target = self._wait_for_cart_frame(
-            after_sequence, timeout_seconds=0.5
+        target = self._wait_for_cart_frame_consensus_after(
+            after_sequence, timeout_seconds=1.0
         )
         if target is not None:
             return target
@@ -1981,8 +2013,8 @@ class ShelfDetectionServer(Node):
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.3)
-            target = self._wait_for_cart_frame(
-                after_sequence, timeout_seconds=0.5
+            target = self._wait_for_cart_frame_consensus_after(
+                after_sequence, timeout_seconds=1.0
             )
             if target is not None:
                 self.get_logger().info(
