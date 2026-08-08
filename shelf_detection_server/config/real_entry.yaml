@@ -28,6 +28,11 @@ shelf_detection_server:
     center_distance_tolerance: 0.20
     center_lateral_tolerance: 0.03
     entry_lateral_realign_deadband: 0.08
+    entry_observation_frames: 5
+    entry_observation_interval: 0.05
+    center_drive_speed_floor: 0.015
+    center_drive_speed_ceiling: 0.05
+    center_drive_error_scale: 0.20
     # Match the simulation's bounded close-range recovery: after the last
     # fresh cart_frame, use the measured remaining distance only when the
     # estimate is inside this finite window.

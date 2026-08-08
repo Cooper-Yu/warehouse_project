@@ -174,6 +174,11 @@ class ShelfDetectionServer(Node):
         self.declare_parameter("final_center_confirmed_shelf_depth", 0.0)
         self.declare_parameter("final_center_max_distance", 0.55)
         self.declare_parameter("final_center_speed", 0.02)
+        self.declare_parameter("entry_observation_frames", 5)
+        self.declare_parameter("entry_observation_interval", 0.05)
+        self.declare_parameter("center_drive_speed_floor", 0.015)
+        self.declare_parameter("center_drive_speed_ceiling", 0.05)
+        self.declare_parameter("center_drive_error_scale", 0.20)
         self.declare_parameter("final_center_timeout", 40.0)
         self.declare_parameter(
             "entry_refine_required_completed_distance", 0.303
@@ -424,7 +429,7 @@ class ShelfDetectionServer(Node):
             response.complete = self._perform_entry_refine_only()
             return response
 
-        target = self._wait_for_cart_frame()
+        target = self._wait_for_cart_frame_consensus()
         if target is None:
             self._publish_stop()
             response.complete = False
@@ -737,6 +742,29 @@ class ShelfDetectionServer(Node):
             time.sleep(0.05)
         return None
 
+    def _wait_for_cart_frame_consensus(self) -> Optional[tuple]:
+        """Collect several fresh leg-pair detections and return a median pose."""
+        count = max(1, int(self.get_parameter("entry_observation_frames").value))
+        interval = max(0.0, float(self.get_parameter("entry_observation_interval").value))
+        samples = []
+        deadline = time.monotonic() + float(self.get_parameter("detection_timeout").value)
+        while rclpy.ok() and time.monotonic() < deadline and len(samples) < count:
+            target = self._detect_cart_frame()
+            if target is not None:
+                samples.append(target)
+            if len(samples) < count:
+                time.sleep(interval)
+        if len(samples) < count:
+            return None
+        frame_id = samples[-1][0]
+        xs = sorted(sample[1] for sample in samples)
+        ys = sorted(sample[2] for sample in samples)
+        headings = [sample[3] for sample in samples]
+        # Circular mean is stable for the small heading residuals accepted here.
+        heading = math.atan2(sum(math.sin(value) for value in headings), sum(math.cos(value) for value in headings))
+        middle = len(samples) // 2
+        return frame_id, xs[middle], ys[middle], heading
+
     def _current_scan_sequence(self) -> int:
         with self._scan_lock:
             return self._scan_sequence
@@ -964,7 +992,30 @@ class ShelfDetectionServer(Node):
                     "center distance"
                 )
                 return False
-            if not self._drive_forward_measured(drive_distance, deadline):
+            drive_error = max(
+                abs(y),
+                max(x - center_x, 0.0),
+            )
+            speed_floor = max(
+                0.0,
+                float(self.get_parameter("center_drive_speed_floor").value),
+            )
+            speed_ceiling = max(
+                speed_floor,
+                float(self.get_parameter("center_drive_speed_ceiling").value),
+            )
+            speed_gain = max(
+                0.0,
+                float(self.get_parameter("center_drive_error_scale").value),
+            )
+            drive_speed = min(speed_ceiling, max(speed_floor, drive_error * speed_gain))
+            self.get_logger().info(
+                "center approach speed selected: "
+                f"error={drive_error:.3f} speed={drive_speed:.3f}"
+            )
+            if not self._drive_forward_measured(
+                drive_distance, deadline, drive_speed
+            ):
                 return False
             if not self._accepted_odom_heading_ok(
                 accepted_odom_yaw, deadline
