@@ -36,6 +36,7 @@ def test_real_entry_profile_is_bounded_and_excludes_final_push():
     assert profile["alignment_required_consecutive_samples"] == 2
     assert profile["forward_speed"] <= 0.05
     assert profile["forward_step_distance"] <= 0.15
+    assert profile["entry_lateral_realign_deadband"] == 0.08
     assert profile["entry_odom_yaw_tolerance"] == 0.04
     assert profile["final_drive_distance"] == 0.3703
 

@@ -849,7 +849,20 @@ class ShelfDetectionServer(Node):
                 if target is None:
                     return False
                 continue
-            if abs(y) > center_y:
+            # Near the accepted standoff, LaserScan leg-pair jitter can move
+            # y by a few centimetres between samples.  Keep the strict
+            # center_lateral_tolerance for acceptance, but do not restart a
+            # full standoff realignment unless the residual is materially
+            # larger than the configured entry deadband.
+            entry_lateral_deadband = max(
+                center_y,
+                float(
+                    self.get_parameter(
+                        "entry_lateral_realign_deadband"
+                    ).value
+                ),
+            )
+            if abs(y) > entry_lateral_deadband:
                 if x < center_x:
                     recovery_limit = int(
                         self.get_parameter("entry_reverse_recovery_limit").value

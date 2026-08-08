@@ -27,6 +27,7 @@ shelf_detection_server:
     forward_step_distance: 0.15
     center_distance_tolerance: 0.20
     center_lateral_tolerance: 0.03
+    entry_lateral_realign_deadband: 0.08
     # Match the simulation's bounded close-range recovery: after the last
     # fresh cart_frame, use the measured remaining distance only when the
     # estimate is inside this finite window.
