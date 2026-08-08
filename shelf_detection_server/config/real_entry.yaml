@@ -67,7 +67,7 @@ shelf_detection_server:
     lateral_rotate_speed: 0.03
     lateral_drive_speed: 0.02
     lateral_max_drive_distance: 0.10
-    lateral_clearance_min_range: 1.00
+    lateral_clearance_min_range: 0.70
     entry_final_standoff: 0.15
     entry_blind_step_distance: 0.15
     entry_blind_max_distance: 0.80
